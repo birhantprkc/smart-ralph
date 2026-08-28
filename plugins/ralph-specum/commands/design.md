@@ -29,8 +29,22 @@ Create a task for each item and complete in order:
 4. Check `requirements.md` exists. If not, error: "Requirements not found. Run /ralph-specum:requirements first."
 5. Read `.ralph-state.json`, reject simultaneous exact `--quick` and `--interactive`, and normalize persistent mode with `phase_gate.py mode`.
 6. When normalized `quickMode` is false, require explicit requirements artifact approval before clearing its approval flag. Exact quick mode continues with the validated file.
-7. Read context: `requirements.md` (required), `research.md` (if exists), `.progress.md`.
-8. Run any missing applicable skill discovery pass. When research exists, pass 2 must be present.
+7. Clear the approval flag through the locked helper while preserving every other field:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "awaitingApproval=false"
+   ```
+8. Read context: `requirements.md` (required), `research.md` (if exists), `.progress.md`.
+9. Run any missing applicable skill discovery pass. When research exists, pass 2 must be present.
+10. Run prototype record selection before design generation:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/prototype-records.py" select-downstream --base-path "$SPEC_PATH" --state "$SPEC_PATH/.ralph-state.json" --target design --target 'transition:requirements->design' --path requirements.md --path design.md
+   ```
+11. Use only valid, `gateApproved: true`, non-superseded prototype evidence that affects design. Exclude skipped, failed, inconclusive, malformed, superseded, and explicitly excluded records.
+12. If selection reports an `activePrototypes` blocker for the design transition, stop before Step 2 and report the active prototype ID, blocker reason, and resume command.
+13. If selection reports stale requirements, research, design, or task indexes that affect this design generation, stop and route to the earliest stale phase or task. Do not generate design from stale artifacts.
+14. Read the matching `targetDecisions` entries. Proven unrelated work may continue only when each entry has `proofAvailable: true` and `eligible: true`; this proves no active blocker, stale input, or approved transfer path overlaps design. Missing or unavailable proof blocks conservatively.
 
 ## Step 2: Skill Load, Critical Grill, and Approval
 
@@ -65,7 +79,7 @@ Follow the full team lifecycle:
 1. **Clean up stale team (MANDATORY FIRST ACTION)**: Call `TeamDelete()` before anything else. This releases whatever team the session is currently leading (could be from any prior phase). Errors mean no team was active -- harmless, proceed.
 2. **Create team**: `TeamCreate(team_name: "design-$spec")`
 3. **Create task**: `TaskCreate(subject: "Generate technical design for $spec", activeForm: "Generating design")`
-4. **Spawn teammate**: Immediately run `check-delegation`, then call `Task(subagent_type: architect-reviewer, team_name: "design-$spec", name: "architect-1")`. Include the absolute state and helper paths, complete `[RALPH_PHASE_GATE]` tuple (`state`, `phase`, `interviewId`, `discoveryRevision`, `contextDigest`), verbatim manifest, fresh artifact agent ID `architect-1`, matching load/write-check instructions, approved decision brief, requirements, and research. Instruct the agent to design architecture with mermaid diagrams, component responsibilities, technical decisions with rationale, file structure, error handling, and test strategy. Output to `$SPEC_PATH/design.md`.
+4. **Spawn teammate**: Immediately run `check-delegation`, then call `Task(subagent_type: architect-reviewer, team_name: "design-$spec", name: "architect-1")`. Include the absolute state and helper paths, complete `[RALPH_PHASE_GATE]` tuple (`state`, `phase`, `interviewId`, `discoveryRevision`, `contextDigest`), verbatim manifest, fresh artifact agent ID `architect-1`, matching load/write-check instructions, approved decision brief, requirements, research, selected prototype evidence, and the clean blocker/stale-gate result. Instruct the agent to design architecture with mermaid diagrams, component responsibilities, technical decisions with rationale, file structure, error handling, and test strategy. Output to `$SPEC_PATH/design.md`.
 5. **Wait for completion**: Monitor via TaskList.
 6. **Shutdown**: `SendMessage(type: "shutdown_request", recipient: "architect-1")`
 7. **Collect results**: Read `$SPEC_PATH/design.md`.
@@ -141,20 +155,26 @@ Ask ONE question: "How do you want to proceed?" with these options via AskUserQu
 
 ### Update State
 
-1. **Merge** into `.ralph-state.json` (preserve all existing fields):
+1. **Merge** into `.ralph-state.json` through the locked helper (preserve all existing and unknown fields):
    ```bash
-   jq '. + {"phase": "design", "awaitingApproval": true}' \
-     "$SPEC_PATH/.ralph-state.json" > "$SPEC_PATH/.ralph-state.json.tmp" && \
-     mv "$SPEC_PATH/.ralph-state.json.tmp" "$SPEC_PATH/.ralph-state.json"
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "phase=design" \
+     --set "awaitingApproval=true"
    ```
 2. Update `.progress.md`: retain the explicit requirements approval and set current phase
 
 ### Commit Spec (if enabled)
 
-Read `commitSpec` from `.ralph-state.json`. If true:
+Read `commitSpec` from `.ralph-state.json`. It authorizes the local commit only. If true:
 ```bash
 git add "$SPEC_PATH/design.md"
 git commit -m "spec($spec): add technical design"
+```
+
+In quick mode, skip only this push: do not ask a remote question, do not push, and continue the quick phase flow. In normal mode, run the Prototype Evidence Push Gate from `${CLAUDE_PLUGIN_ROOT}/references/commit-discipline.md` immediately before the existing push. If outbound commits contain `**/prototypes/*.md`, require separate explicit authorization naming every exact record; otherwise preserve the existing push behavior.
+
+```bash
 git push -u origin $(git branch --show-current)
 ```
 If commit or push fails, display warning but continue.

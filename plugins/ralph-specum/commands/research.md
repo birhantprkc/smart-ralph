@@ -145,34 +145,43 @@ Output: $SPEC_PATH/research.md
 If normalized `quickMode` is true, skip to Step 7.
 
 Ask ONE question: "How do you want to proceed?" with these options via AskUserQuestion:
-1. **Approve** (Recommended) -- Accept artifact as-is, advance to next phase
-2. **Run review** -- Spawn spec-reviewer to validate against rubrics, show findings, then loop back to this choice
-3. **Request changes** -- Provide specific feedback to revise the artifact
+1. **Continue to requirements** (Recommended) -- Approve research and keep the normal phase path
+2. **continue to prototype** -- Approve research and run one suggested prototype before requirements
+3. **Run review** -- Spawn spec-reviewer to validate against rubrics, show findings, then loop back to this choice
+4. **Request changes** -- Provide specific feedback to revise the artifact
 
-**If "Approve"**: proceed to Step 7.
-**If "Run review"**: Invoke spec-reviewer via Task tool with full research.md content (upstream: none). Display findings table. If REVIEW_PASS, note it. If REVIEW_FAIL, show feedback. Then loop back to this same 3-choice question (user decides next action).
-**If "Request changes", "Other", or `apply the changes`**: Apply already-recorded review or revision feedback immediately. Ask one focused change question only when no pending feedback exists. Run the delegation gate, invoke the research agents with the feedback and original marker/manifest, re-merge, re-display the walkthrough, and ask again with the same choices. Stay in artifact approval until explicit `Approve`.
+**If "Continue to requirements"**: set `nextAction: requirements`, then proceed to Step 7 without creating a prototype.
+**If "continue to prototype"**: set `nextAction: prototype`, treat research as approved, then proceed to Step 7.
+**If "Run review"**: Invoke spec-reviewer via Task tool with full research.md content (upstream: none). Display findings table. If REVIEW_PASS, note it. If REVIEW_FAIL, show feedback. Then loop back to this same 4-choice question (user decides next action).
+**If "Request changes", "Other", or `apply the changes`**: Apply already-recorded review or revision feedback immediately. Ask one focused change question only when no pending feedback exists. Run the delegation gate, invoke the research agents with the feedback and original marker/manifest, re-merge, re-display the walkthrough, and ask again with the same choices.
+Treat either continue option as explicit artifact approval. Stay in artifact approval until the user selects one of them.
 
 ## Step 7: Finalize
 
 ### Update State
 
 1. Parse "Related Specs" table from research.md
-2. **Merge** into `.ralph-state.json` (preserve all existing fields):
+2. **Merge** into `.ralph-state.json` through the locked helper (preserve all existing and unknown fields):
    ```bash
-   jq --argjson specs "$RELATED_SPECS_JSON" \
-     '. + {"phase": "research", "awaitingApproval": true, "relatedSpecs": $specs}' \
-     "$SPEC_PATH/.ralph-state.json" > "$SPEC_PATH/.ralph-state.json.tmp" && \
-     mv "$SPEC_PATH/.ralph-state.json.tmp" "$SPEC_PATH/.ralph-state.json"
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "phase=research" \
+     --set "awaitingApproval=true" \
+     --json "relatedSpecs=$RELATED_SPECS_JSON"
    ```
 3. Update `.progress.md` with research completion
 
 ### Commit Spec (if enabled)
 
-Read `commitSpec` from `.ralph-state.json`. If true:
+Read `commitSpec` from `.ralph-state.json`. It authorizes the local commit only. If true:
 ```bash
 git add "$SPEC_PATH/research.md"
 git commit -m "spec($spec): add research findings"
+```
+
+In quick mode, skip only this push: do not ask a remote question, do not push, and continue the quick phase flow. In normal mode, run the Prototype Evidence Push Gate from `${CLAUDE_PLUGIN_ROOT}/references/commit-discipline.md` immediately before the existing push. If outbound commits contain `**/prototypes/*.md`, require separate explicit authorization naming every exact record; otherwise preserve the existing push behavior.
+
+```bash
 git push -u origin $(git branch --show-current)
 ```
 If commit or push fails, display warning but continue.
@@ -184,7 +193,13 @@ If commit or push fails, display warning but continue.
 
 (Does not apply when normalized quick mode is authorized.)
 
+If `nextAction: prototype`:
+1. Invoke `/ralph-specum:prototype --suggested --return-phase requirements` with the resolved `basePath` at this phase boundary.
+2. Let the prototype coordinator own resume, review, verdict, cleanup, publication, and handoff.
+3. End after the coordinator returns to requirements. Do not generate requirements in this command.
+
+Otherwise:
 1. Display: `-> Next: Run /ralph-specum:requirements`
-2. End your response immediately
-3. Wait for user to explicitly run `/ralph-specum:requirements`
+2. End your response immediately.
+3. Wait for the user to run `/ralph-specum:requirements`.
 </mandatory>

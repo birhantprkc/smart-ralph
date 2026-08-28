@@ -12,7 +12,7 @@ From `$ARGUMENTS`, extract:
 - **--fresh**: Force new spec without prompting if one exists
 - **--quick**: Bypass phase interviews and artifact-approval stops while still loading contracts, gating, and generating every artifact
 - **--interactive**: Clear persistent quick mode and run the normal gated flow
-- **--commit-spec**: Commit and push spec files after generation (default: true in normal mode, false in quick mode)
+- **--commit-spec**: Commit spec files locally after generation (default: true in normal mode, false in quick mode). Existing normal-mode pushes still run after the Prototype Evidence Push Gate; this flag never authorizes a prototype record push.
 - **--no-commit-spec**: Explicitly disable committing spec files
 - **--specs-dir <path>**: Create spec in specified directory (must be in configured specs_dirs array)
 - **--tasks-size <fine|coarse>**: Task granularity level for task generation
@@ -161,11 +161,12 @@ Intent Classification:
    - "regression", "reproduce", "repro", "issue"
    -> Seed reproduction, expected versus observed behavior, regression history,
       affected scope, and verification branches.
-   Note: TRIVIAL-specific keywords override BUG_FIX when both match.
+   Note: An explicit trivial-change phrase such as "fix typo" may override
+   BUG_FIX. A generic speed modifier such as "quick" or "quickly" never does.
 
 2. TRIVIAL: Goal contains keywords like:
    - "fix typo", "typo", "spelling"
-   - "small change", "minor", "quick", "simple", "tiny"
+   - "small change", "minor", "simple", "tiny"
    - "rename", "update text"
    -> Seed target, exact desired result, and scope-boundary branches.
 

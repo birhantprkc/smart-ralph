@@ -30,14 +30,28 @@ Create a task for each item and complete in order:
 5. Check `requirements.md` exists
 6. Read `.ralph-state.json`, reject simultaneous exact `--quick` and `--interactive`, and normalize persistent mode with `phase_gate.py mode`.
 7. When normalized `quickMode` is false, require explicit design artifact approval before clearing its approval flag. Exact quick mode continues with the validated file.
-8. **`--tasks-size` flag handling**: Check `$ARGUMENTS` for `--tasks-size` flag:
-   - If value is `fine` or `coarse`: update `granularity` in `.ralph-state.json` to the given value (overrides any value set by `/ralph-specum:start`)
-   - If value is invalid (not `fine` or `coarse`): warn the user (`Invalid --tasks-size value "<value>", defaulting to fine`) and set `"granularity": "fine"` in `.ralph-state.json`
-   - If `--tasks-size` is absent and `granularity` is already set, preserve it
-   - If `--tasks-size` is absent and `granularity` is unset, set the documented `fine` default
-9. Treat granularity as workflow administration. Never add it to the interview frontier or count it as an answered gate decision.
-10. Run any missing applicable skill discovery pass. When research exists, pass 2 must be present.
-11. Read context: `requirements.md`, `design.md`, `research.md` (if exists), `.progress.md`.
+8. Clear the approval flag through the locked helper while preserving every other field:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "awaitingApproval=false"
+   ```
+9. **`--tasks-size` flag handling**: Check `$ARGUMENTS` for `--tasks-size` flag:
+   - If value is `fine` or `coarse`: merge it with `locked-state.py merge --state "$SPEC_PATH/.ralph-state.json" --set "granularity=$GRANULARITY"` (overrides any value set by `/ralph-specum:start`)
+   - If value is invalid (not `fine` or `coarse`): warn the user (`Warning: Invalid --tasks-size value "<value>", defaulting to fine`) and merge `granularity=fine` through the same helper
+   - If `--tasks-size` is absent and `granularity` is already set: preserve it
+   - If `--tasks-size` is absent and `granularity` is unset: merge the documented `granularity=fine` default through the same helper
+10. Treat granularity as workflow administration. Never add it to the interview frontier or count it as an answered gate decision.
+11. Run any missing applicable skill discovery pass. When research exists, pass 2 must be present.
+12. Read context: `requirements.md`, `design.md`, `research.md` (if exists), `.progress.md`.
+13. Run prototype record selection before task generation:
+    ```bash
+    python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/prototype-records.py" select-downstream --base-path "$SPEC_PATH" --state "$SPEC_PATH/.ralph-state.json" --target tasks --target 'transition:design->tasks' --path design.md --path tasks.md
+    ```
+14. Include only valid, `gateApproved: true`, non-superseded prototype evidence returned by the selector. Reject skipped, failed, inconclusive, cancelled, malformed, superseded, and explicitly excluded records.
+15. If selection reports an `activePrototypes` blocker for task generation, stop before Step 2 and report the active prototype ID, blocker reason, and resume command. Proven unrelated prototypes may continue only when every matching `targetDecisions` entry has `proofAvailable: true` and `eligible: true`; missing dependency or transfer-path proof blocks conservatively.
+16. If selection reports stale `design.md` or an upstream artifact that design depends on, stop and route to the earliest stale phase. Do not generate tasks from stale design.
+17. Pass selected prototype evidence and the clean blocker/stale-gate result to the task-planner.
 
 ## Step 2: Skill Load, Critical Grill, and Approval
 
@@ -61,6 +75,26 @@ Inspect test tooling, CI, dependency order, deployment mechanisms, and team conv
 
 Treat these candidates as exploration territory for the design tree, not a script. Add grounded sequencing or verification approaches only when they remain genuine user decisions. Apply domain-language modeling from the interview framework and append each completed frontier round to `.progress.md`.
 
+### Execution Strategy Branch
+
+When execution strategy requires a user decision, add 2-3 grounded strategies to the design tree. Examples (illustrative only):
+- **(A)** Aggressive POC -- fewer tasks, ship in small increments, add polish later
+- **(B)** Thorough -- more tasks with full test coverage and quality gates throughout
+- **(C)** Phased delivery -- split into multiple PRs with clear milestones
+
+### Store Grill Results
+
+Append to `.progress.md` under "Interview Responses":
+```markdown
+### Tasks Grill (from tasks.md)
+- [Round decisions and resolved facts]
+- E2E verification: YES/NO -- [strategy or "auto"]
+- Chosen approach: [name] -- [brief description]
+- Shared understanding: confirmed
+```
+
+Pass combined context to delegation prompt as "Interview Context".
+
 Use `classify-reply` before applying every reply, `revise --decision-id` for final-approval revisions, and `confirm --source approve-and-delegate` only for the explicit approval selection.
 
 ## Step 3: Execute Task Generation (Team-Based)
@@ -77,7 +111,7 @@ Follow the full team lifecycle:
 1. **Clean up stale team (MANDATORY FIRST ACTION)**: Call `TeamDelete()` before anything else. This releases whatever team the session is currently leading (could be from any prior phase). Errors mean no team was active -- harmless, proceed.
 2. **Create team**: `TeamCreate(team_name: "tasks-$spec")`
 3. **Create task**: `TaskCreate(subject: "Generate implementation tasks for $spec", activeForm: "Generating tasks")`
-4. **Spawn teammate**: Immediately run `check-delegation`, then call `Task(subagent_type: task-planner, team_name: "tasks-$spec", name: "planner-1")`. Include the absolute state and helper paths, complete `[RALPH_PHASE_GATE]` tuple (`state`, `phase`, `interviewId`, `discoveryRevision`, `contextDigest`), verbatim manifest, fresh artifact agent ID `planner-1`, matching load/write-check instructions, approved decision brief, requirements, and design. Instruct the agent to:
+4. **Spawn teammate**: Immediately run `check-delegation`, then call `Task(subagent_type: task-planner, team_name: "tasks-$spec", name: "planner-1")`. Include the absolute state and helper paths, complete `[RALPH_PHASE_GATE]` tuple (`state`, `phase`, `interviewId`, `discoveryRevision`, `contextDigest`), verbatim manifest, fresh artifact agent ID `planner-1`, matching load/write-check instructions, approved decision brief, requirements, design, selected prototype evidence, and the clean blocker/stale-gate result. Instruct the agent to:
    - Break implementation into POC-first phases (Phase 1-5 per phase-rules.md)
    - Create atomic, autonomous-ready tasks with Do/Files/Done when/Verify/Commit fields
    - Insert quality checkpoints per quality-checkpoints.md
@@ -166,16 +200,28 @@ Ask ONE question: "How do you want to proceed?" with these options via AskUserQu
 
 ### Update State
 
-1. Count total tasks from generated file
-2. Update `.ralph-state.json`: `{ "phase": "tasks", "totalTasks": <count>, "awaitingApproval": true }`
+1. Count total tasks from the generated file into `TOTAL_TASKS`
+2. Merge the task phase fields through the locked helper, preserving every existing and unknown field:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "phase=tasks" \
+     --set "totalTasks=$TOTAL_TASKS" \
+     --set "awaitingApproval=true"
+   ```
 3. Update `.progress.md`: retain the explicit design approval, set current phase, and update task count
 
 ### Commit Spec (if enabled)
 
-Read `commitSpec` from `.ralph-state.json`. If true:
+Read `commitSpec` from `.ralph-state.json`. It authorizes the local commit only. If true:
 ```bash
 git add "$SPEC_PATH/tasks.md"
 git commit -m "spec($spec): add implementation tasks"
+```
+
+In quick mode, skip only this push: do not ask a remote question, do not push, and continue the quick phase flow. In normal mode, run the Prototype Evidence Push Gate from `${CLAUDE_PLUGIN_ROOT}/references/commit-discipline.md` immediately before the existing push. If outbound commits contain `**/prototypes/*.md`, require separate explicit authorization naming every exact record; otherwise preserve the existing push behavior.
+
+```bash
 git push -u origin $(git branch --show-current)
 ```
 If commit or push fails, display warning but continue.

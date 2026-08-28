@@ -17,8 +17,10 @@ Create a task for each item and complete in order:
 3. **First-run support** -- offer the one-time GitHub star choice
 4. **Parse input** -- extract name, goal, and remaining flags
 5. **Set up spec** -- create or resolve state before discovery
-6. **Run gates** -- discover skills, load contracts, grill, and get approval
-7. **Delegate** -- gate the research team, then require artifact approval
+6. **Reconcile prototype work** -- recover candidates and route active overlays
+7. **Scan existing specs** -- find matching or related specs
+8. **Run gates** -- discover skills, load contracts, grill, and get approval
+9. **Delegate or resume** -- gate the research team or route the selected existing workflow
 
 Read `${CLAUDE_PLUGIN_ROOT}/references/normal-mode-gates.md` before starting. It is authoritative for mode, discovery, preload, interview, and delegation enforcement.
 
@@ -47,7 +49,9 @@ FIRST_RUN_MARKER="$FIRST_RUN_DIR/star-prompt-v1"
 
 Do not ask again when the marker exists.
 
-When the marker does not exist, use `AskUserQuestion` once. This one-time support question is allowed even when `--quick` is present.
+When `--quick` is present, skip the rest of Step 1.5 without asking, starring, or writing the marker.
+
+Otherwise, when the marker does not exist, use `AskUserQuestion` once.
 
 Question: "Would you like to star Smart Ralph on GitHub?"
 
@@ -83,7 +87,21 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/intent-classification.md` and follow the 
 
 ### Quick Mode Check
 
-If the exact `--quick` token is present, skip to **Step 5: Quick Mode Flow**. Exact `--interactive` selects the normal flow.
+Do not skip prototype recovery. If the exact `--quick` token is present, complete Step 2.5 and then continue to **Step 5: Quick Mode Flow**. Exact `--interactive` selects the normal flow.
+
+## Step 2.5: Reconcile Prototype Work
+
+Use the classified target from Step 2. For resume intent, resolve that exact target with `ralph_resolve_context` from `${CLAUDE_PLUGIN_ROOT}/hooks/scripts/path-resolver.sh`. For new-spec intent, skip recovery of the existing current spec. If the classified target's `basePath` and `<basePath>/.ralph-state.json` exist:
+
+1. Run `${CLAUDE_PLUGIN_ROOT}/hooks/scripts/prototype-records.py reconcile --base-path "$basePath" --state "$basePath/.ralph-state.json"` before selecting resume work. This is the only allowed candidate/final recovery path.
+2. Re-read state and treat a missing `activePrototypes` field as an empty map. Sort entries by `created`, then ID, so every resume choice is deterministic.
+3. If the classified intent names an explicit active prototype ID, invoke `/ralph-specum:prototype --resume <id>` and stop this command.
+4. In normal mode, invoke `/ralph-specum:prototype --resume <id>` automatically when exactly one active entry remains. When several remain, list their IDs, questions, statuses, blockers, `returnPhase`, and `returnTaskIndex`; ask the user to select an ID and stop this command.
+5. In quick mode, never ask. Sort design blockers by `created`, then ID. At or after the post-requirements prototype boundary, invoke `/ralph-specum:prototype --quick`; the prototype coordinator takes over the oldest design blocker and owns its decisions. Before that boundary, preserve the existing quick flow and pass the ordered blocker set to its required post-requirements prototype call.
+
+6. For each `resume_review` action, parse the exact candidate, verify its ID and hash against the reconciliation result, and reconstruct the minimal recovery entry from its record and source pointers. Before reviewer dispatch, reserve that candidate ID through create-only `locked-state.py upsert-prototype` with `status: reviewing`, the exact `candidateHash`, null owner and lease fields, a null or absent `harnessRun.id`, blocker and return fields, source pointers, and recovery timestamps. This is a recovery-only entry: cancellation verifies that `owner`, `leaseToken`, and `harnessRun.id` are all null or absent and that no builder is associated, then skips interrupt and release; inconsistent builder ownership fails closed. If a concurrent reservation appears, re-read it and continue only when its `candidateHash` matches; never overwrite an entry. Route the restored entry through the prototype coordinator's deterministic exact-byte review and publish path. If reconstruction or reservation cannot proceed, stop and report the candidate ID and candidate hash.
+
+Candidate actions returned as `resume_review` are active recovery work, not terminal evidence. Valid immutable finals removed from `activePrototypes` by reconciliation do not resume. Quarantined or malformed records are reported and excluded. If there is no overlay work, preserve the existing start behavior below.
 
 ## Step 3: Scan Existing Specs
 

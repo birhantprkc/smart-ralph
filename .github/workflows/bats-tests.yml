@@ -3,21 +3,25 @@ name: Bats Tests
 on:
   push:
     paths:
-      - 'plugins/**/*.sh'
+      - 'plugins/ralph-specum/**'
       - 'plugins/ralph-specum-codex/**'
+      - 'plugins/**/*.sh'
       - '.agents/plugins/marketplace.json'
       - 'README.md'
       - 'tests/**/*.bats'
+      - 'tests/test_prototype_windows.py'
       - 'tests/helpers/**'
       - 'tests/fixtures/**'
       - '.github/workflows/bats-tests.yml'
   pull_request:
     paths:
-      - 'plugins/**/*.sh'
+      - 'plugins/ralph-specum/**'
       - 'plugins/ralph-specum-codex/**'
+      - 'plugins/**/*.sh'
       - '.agents/plugins/marketplace.json'
       - 'README.md'
       - 'tests/**/*.bats'
+      - 'tests/test_prototype_windows.py'
       - 'tests/helpers/**'
       - 'tests/fixtures/**'
       - '.github/workflows/bats-tests.yml'
@@ -33,7 +37,19 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bats jq
+          sudo apt-get install -y bats jq ripgrep
 
       - name: Run bats tests
         run: bats tests/*.bats
+
+  prototype-windows:
+    name: Prototype Windows unittest
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run prototype Windows unittest
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest tests/test_prototype_windows.py

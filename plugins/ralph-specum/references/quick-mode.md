@@ -67,12 +67,7 @@ Validation Sequence:
    basePath = "$specsDir/$name"
 4. Create spec directory: mkdir -p "$basePath"
 4a. Ensure gitignore entries exist (.current-spec, .progress.md)
-5. Write .ralph-state.json:
-   { source: "plan", name, goal, basePath, phase: "research",
-     taskIndex: 0, totalTasks: 0, taskIteration: 1,
-     maxTaskIterations: 5, globalIteration: 1,
-     maxGlobalIterations: 100, commitSpec: $commitSpec,
-     quickMode: false, discoveredSkills: [] }
+5. Create `.ralph-state.json` with `locked-state.py merge --state "$basePath/.ralph-state.json"`, setting `source`, `name`, `goal`, `basePath`, `phase: research`, task and iteration counters, `commitSpec`, and `quickMode: false`, plus `--json 'discoveredSkills=[]'`. Preserve unknown fields if recovery state already exists.
 5a. Run `phase_gate.py mode "$STATE" --quick` to create the exact persistent quick authorization.
 6. Write .progress.md with original goal
 6a. Derive all six Scope Envelope fields from the explicit goal or plan.
@@ -127,14 +122,32 @@ Validation Sequence:
 11. Research Phase: reload selected contracts and record the current `start` manifest; call `begin-interview` for phase `start` to record `bypassed_quick`; run `check-delegation`; create the native task; run Team Research with a gate marker and unique artifact agent ID per research teammate; skip walkthrough; clear awaitingApproval; mark the native task complete
 12. Skill Discovery Pass 2: follow `normal-mode-gates.md` using goal + research Executive Summary
 13. Requirements Phase: reload selected contracts and record the current `requirements` manifest; call `begin-interview`; run `check-delegation`; create the native task; delegate to product-manager with a unique artifact agent ID, gate marker, manifest, and Quick Mode Directive; run review loop; mark complete
-14. Design Phase: reload selected contracts and record the current `design` manifest; call `begin-interview`; run `check-delegation`; create the native task; delegate to architect-reviewer with a unique artifact agent ID, gate marker, manifest, and Quick Mode Directive; run review loop; mark complete
+13a. Post-Requirements Prototype Gate: execute the single quick request defined below. Every outcome continues to step 14.
+14. Design Phase: reload selected contracts and record the current `design` manifest; call `begin-interview`; run `check-delegation`; run prototype downstream selection; create the native task; delegate to architect-reviewer with a unique artifact agent ID, gate marker, manifest, Quick Mode Directive, and selected evidence; run review loop; mark complete
 15. Tasks Phase: reload selected contracts and record the current `tasks` manifest; call `begin-interview`; run `check-delegation`; create the native task; delegate to task-planner with a unique artifact agent ID, gate marker, manifest, and Quick Mode Directive; run review loop; mark complete
 16. Transition to Execution:
     - Count total tasks (number of `- [ ]` checkboxes)
     - Update state: phase="execution", totalTasks=<count>, taskIndex=0
-    - If commitSpec: stage, commit, push spec files
+    - If `commitSpec`: stage and commit spec files locally. `commitSpec` authorizes no remote action.
+    - Apply the Prototype Evidence Push Gate by keeping every quick-mode commit local. Quick mode never asks for push authorization and never pushes.
 17. Invoke spec-executor for task 1
 ```
+
+## Post-Requirements Prototype Gate
+
+This is the only quick prototype call site. Run it once after requirements review and before design generation.
+
+1. Reconcile candidates and read `activePrototypes` plus valid terminal records from the resolved `basePath`.
+2. If a prototype blocks design, take over the oldest by `created` timestamp. Preserve its question, source pointers, `returnPhase`, and task index. Record `decisionOwner: agent` and `resolutionMode: quick_takeover`.
+3. If no entry blocks design, select the highest-risk grounded falsifiable question from research and requirements. If none exists, let the coordinator publish `skipped: no suitable question` with `sourceDisposition: not_created`.
+4. Invoke `/ralph-specum:prototype --quick --return-phase design` with the resolved `basePath`.
+5. Set `requestAttempt: 1` for the request. Keep `builderExecutionAttempt` separate: the first launch is 1 and the one allowed mechanical retry is 2. Duplicate reuse, supersession, conflict resolution, skip, and lock failure consume the request without adding a builder execution.
+6. Make every capture, conflict, verdict, timeout, handoff, and cleanup choice without asking the user. Extra active entries remain preserved and excluded from design input.
+7. For ephemeral source, require the cleanup receipt, source-absence check, and `REVIEW_PASS` on the exact final `sourceDisposition: deleted` candidate bytes before publication.
+8. Automatically gate-approve only `validated` and `rejected`. Exclude `inconclusive`, `failed`, `skipped`, `cancelled`, malformed, and superseded records.
+9. Continue to design after every result. On resume, a completed quick request counts as the one request; do not invoke the coordinator again.
+
+The quick path has no prototype question, verdict, retry, cleanup, or handoff prompt. It never delegates a decision to the user.
 
 ## Step 9: Skill Discovery Pass 1
 

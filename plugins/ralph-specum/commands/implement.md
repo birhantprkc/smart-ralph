@@ -39,6 +39,55 @@ specs_dirs: ["./specs", "./packages/api/specs", "./packages/web/specs"]
 2. Check the spec's tasks.md exists. If not: error "Tasks not found. Run /ralph-specum:tasks first."
 3. Set `$SPEC_PATH` to the resolved spec directory path. All references use this variable.
 
+### Prototype Dispatch Gate
+
+Before initialization or task dispatch:
+
+1. Read `.ralph-state.json` and reconcile whenever state exists:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/prototype-records.py" reconcile --base-path "$SPEC_PATH" --state "$SPEC_PATH/.ralph-state.json"
+   ```
+2. Parse `tasks.md` once into ordered top-level task rows before selection. A task row is an unindented checkbox outside fenced example blocks whose next token is a concrete numeric task ID, `V<number>`, `VE<number>`, or `VF`. Exclude nested and example checkboxes, completion criteria, and placeholder IDs. Derive every counter from that one ordered list:
+   ```bash
+   TASK_COUNTS=$(python3 - "$SPEC_PATH/tasks.md" <<'PY'
+   import re
+   import sys
+   from pathlib import Path
+
+   task_re = re.compile(r"^- \[(?P<mark>[ xX])\] (?P<id>(?:\d+(?:\.\d+)+|V\d+|VE\d+|VF))\b")
+   rows = []
+   fence = None
+   for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+       stripped = line.lstrip()
+       marker = stripped[:3]
+       if marker in {"```", "~~~"}:
+           fence = None if fence == marker else marker if fence is None else fence
+           continue
+       if fence is None:
+           match = task_re.match(line)
+           if match:
+               rows.append(match.group("mark").lower() == "x")
+
+   total = len(rows)
+   completed = sum(rows)
+   first_incomplete = next((index for index, done in enumerate(rows) if not done), total)
+   print(f"{total}\t{completed}\t{first_incomplete}")
+   PY
+   )
+   IFS=$'\t' read -r TOTAL COMPLETED FIRST_INCOMPLETE <<EOF
+   $TASK_COUNTS
+   EOF
+   TASK_INDEX_TO_MERGE=$FIRST_INCOMPLETE
+   TASK_INDEX=$TASK_INDEX_TO_MERGE
+   ```
+   `TOTAL` is the row count. `COMPLETED` is the completed count across all rows, regardless of order. `FIRST_INCOMPLETE` is the zero-based position of the first incomplete row, or `TOTAL` when all rows are complete. It is independent of `COMPLETED`, so non-prefix completion cases dispatch the earliest unchecked task. For fresh execution, keep `TASK_INDEX_TO_MERGE=$FIRST_INCOMPLETE`. On prototype return, read the relevant ID's `returnTaskIndex` from its reconciled active entry or immutable terminal record. Require a non-negative integer within the task list and verify that it identifies the first eligible incomplete task. Set both `TASK_INDEX_TO_MERGE` and `TASK_INDEX` to that validated value before selection.
+3. When `activePrototypes` is nonempty or the `prototypes/` history directory exists, select for execution, the resolved dispatch task, and every declared path for that task:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/prototype-records.py" select-downstream --base-path "$SPEC_PATH" --state "$SPEC_PATH/.ralph-state.json" --target execution --target "task:$TASK_INDEX" --path "<each declared current-task path>"
+   ```
+4. Stop before dispatch when `activeBlockers` targets execution or the resolved task, when `staleTaskIndexes` contains `TASK_INDEX`, or when `staleArtifacts` contains an upstream artifact required by that task. Report the prototype ID and route resume through `/ralph-specum:prototype --resume <id>`.
+5. Preserve eligible work only when every matching `targetDecisions` entry has `proofAvailable: true` and `eligible: true`. Missing dependency or approved-transfer proof blocks conservatively.
+
 ## Step 2: Parse Arguments
 
 From `$ARGUMENTS`:
@@ -48,15 +97,7 @@ From `$ARGUMENTS`:
 
 ## Step 3: Initialize Execution State
 
-Count tasks using these exact commands:
-
-```bash
-TOTAL=$(grep -c -e '- \[.\]' "$SPEC_PATH/tasks.md" 2>/dev/null || echo 0)
-COMPLETED=$(grep -c -e '- \[x\]' "$SPEC_PATH/tasks.md" 2>/dev/null || echo 0)
-FIRST_INCOMPLETE=$((COMPLETED))
-```
-
-Key: Use `-e` flag so grep doesn't interpret the pattern's leading hyphen as an option.
+Use `TOTAL`, `COMPLETED`, `FIRST_INCOMPLETE`, and `TASK_INDEX_TO_MERGE` from the Prototype Dispatch Gate. Do not recalculate or replace the validated dispatch index after selection.
 
 **CRITICAL: Merge into existing state -- do NOT overwrite the file.**
 
@@ -67,7 +108,7 @@ Update `.ralph-state.json` by merging these fields into the existing object:
 ```json
 {
   "phase": "execution",
-  "taskIndex": "<first incomplete>",
+  "taskIndex": "<resolved dispatch index>",
   "totalTasks": "<count>",
   "taskIteration": 1,
   "maxTaskIterations": "<parsed from --max-task-iterations or default 5>",
@@ -87,36 +128,29 @@ Update `.ralph-state.json` by merging these fields into the existing object:
 }
 ```
 
-Use a jq merge pattern to preserve existing fields:
+Use the locked helper to merge every execution field while preserving existing and unknown fields:
+
 ```bash
-jq --argjson taskIndex <first_incomplete> \
-   --argjson totalTasks <count> \
-   --argjson maxTaskIter <parsed or 5> \
-   --argjson recoveryMode <true|false> \
-   --argjson maxGlobalIter <parsed or 100> \
-   '
-   . + {
-     phase: "execution",
-     taskIndex: $taskIndex,
-     totalTasks: $totalTasks,
-     taskIteration: 1,
-     maxTaskIterations: $maxTaskIter,
-     recoveryMode: $recoveryMode,
-     maxFixTasksPerOriginal: 3,
-     maxFixTaskDepth: 3,
-     globalIteration: 1,
-     maxGlobalIterations: $maxGlobalIter,
-     fixTaskMap: {},
-     modificationMap: {},
-     maxModificationsPerTask: 3,
-     maxModificationDepth: 2,
-     awaitingApproval: false,
-     nativeTaskMap: {},
-     nativeSyncEnabled: true,
-     nativeSyncFailureCount: 0
-   }
-   ' "$SPEC_PATH/.ralph-state.json" > "$SPEC_PATH/.ralph-state.json.tmp" && \
-   mv "$SPEC_PATH/.ralph-state.json.tmp" "$SPEC_PATH/.ralph-state.json"
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+  --state "$SPEC_PATH/.ralph-state.json" \
+  --set "phase=execution" \
+  --set "taskIndex=$TASK_INDEX_TO_MERGE" \
+  --set "totalTasks=$TOTAL" \
+  --set "taskIteration=1" \
+  --set "maxTaskIterations=$MAX_TASK_ITERATIONS" \
+  --set "recoveryMode=$RECOVERY_MODE" \
+  --set "maxFixTasksPerOriginal=3" \
+  --set "maxFixTaskDepth=3" \
+  --set "globalIteration=1" \
+  --set "maxGlobalIterations=$MAX_GLOBAL_ITERATIONS" \
+  --json 'fixTaskMap={}' \
+  --json 'modificationMap={}' \
+  --set "maxModificationsPerTask=3" \
+  --set "maxModificationDepth=2" \
+  --set "awaitingApproval=false" \
+  --json 'nativeTaskMap={}' \
+  --set "nativeSyncEnabled=true" \
+  --set "nativeSyncFailureCount=0"
 ```
 
 **Preserved fields** (set by earlier phases, must NOT be removed):
@@ -159,11 +193,12 @@ Then Read and follow these references in order. They contain the complete coordi
 - **You are a COORDINATOR, not an implementer.** Delegate via Task tool. Never implement yourself.
 - **Fully autonomous.** Never ask questions or wait for user input.
 - **State-driven loop.** Read .ralph-state.json each iteration to determine current task.
-- **Completion check.** If taskIndex >= totalTasks, verify all [x] marks, delete state file, output ALL_TASKS_COMPLETE.
+- **Completion check.** If taskIndex >= totalTasks, verify all [x] marks. If `activePrototypes` is nonempty, keep the state file and finish or cancel those entries before completion. Delete state only after the active map is empty, then output ALL_TASKS_COMPLETE.
 - **Task delegation.** Extract full task block from tasks.md, delegate to spec-executor (or qa-engineer for [VERIFY] tasks).
 - **After TASK_COMPLETE.** Run all 3 verification layers, then update state (advance taskIndex, reset taskIteration).
 - **On failure.** Parse failure output, increment taskIteration. If recovery-mode: generate fix task. If max retries exceeded: error and stop.
 - **Modification requests.** If TASK_MODIFICATION_REQUEST in output, process SPLIT_TASK / ADD_PREREQUISITE / ADD_FOLLOWUP per coordinator-pattern.md.
+- **Remote lifecycle.** Apply the Prototype Evidence Push Gate before a push-dependent PR, CI, review, or issue path. When the gate skips or denies the push, end the dependent remote lifecycle path: do not run `gh pr create`, `gh pr merge`, `gh pr checks`, `gh pr view`, `gh api`, `gh run`, `gh issue`, remote review polling, issue writes, or later remote steps that depend on that push. Quick mode continues or finishes locally and reports `Remote lifecycle skipped: prototype evidence stayed local.` Preserve the normal remote lifecycle only after the gate completes the push.
 
 ### Error States (never output ALL_TASKS_COMPLETE)
 
@@ -177,17 +212,18 @@ Then Read and follow these references in order. They contain the complete coordi
 
 When all tasks complete (taskIndex >= totalTasks):
 1. Verify all tasks marked [x] in tasks.md
-2. Delete .ralph-state.json
-3. Keep .progress.md (preserve learnings and history)
-4. Cleanup orphaned temp progress files: `find "$SPEC_PATH" -name ".progress-task-*.md" -mmin +60 -delete 2>/dev/null || true`
-5. Update spec index: `./plugins/ralph-specum/hooks/scripts/update-spec-index.sh --quiet`
-6. Commit remaining spec changes:
+2. Reconcile prototype records. If `activePrototypes` is nonempty, keep `.ralph-state.json`, report the remaining IDs, and stop before `ALL_TASKS_COMPLETE`.
+3. Re-read state with `locked-state.py list --state "$SPEC_PATH/.ralph-state.json"`. Only when `activePrototypes` is empty, delete state through `locked-state.py delete-state --state "$SPEC_PATH/.ralph-state.json"`.
+4. Keep .progress.md (preserve learnings and history)
+5. Cleanup orphaned temp progress files: `find "$SPEC_PATH" -name ".progress-task-*.md" -mmin +60 -delete 2>/dev/null || true`
+6. Update spec index: `./plugins/ralph-specum/hooks/scripts/update-spec-index.sh --quiet`
+7. Commit remaining spec changes:
    ```bash
    git add "$SPEC_PATH/tasks.md" "$SPEC_PATH/.progress.md" ./specs/.index/
    git diff --cached --quiet || git commit -m "chore(spec): final progress update for $spec"
    ```
-7. Check for PR link: `gh pr view --json url -q .url 2>/dev/null`
-8. Output: ALL_TASKS_COMPLETE (and PR link if exists)
+8. Check for a PR link with `gh pr view --json url -q .url 2>/dev/null` only when the Prototype Evidence Push Gate completed the branch push. If the gate skipped or denied the push, skip this dependent remote lookup.
+9. Output: ALL_TASKS_COMPLETE (and PR link if exists)
 
 ## Output on Start
 

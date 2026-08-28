@@ -66,7 +66,14 @@ If `nativeSyncEnabled` is not `false` in state AND (`nativeTaskMap` is missing o
    - On failure: increment `nativeSyncFailureCount` in state. If count >= 3: set `nativeSyncEnabled` to `false`, log "Native sync disabled after 3 consecutive failures" to .progress.md, stop creating remaining tasks and continue without sync
    - Store mapping: nativeTaskMap[i] = returned task ID
    - If task already completed ([x]): immediately TaskUpdate(taskId: nativeTaskMap[i], status: "completed")
-3. Write updated nativeTaskMap to .ralph-state.json
+3. Merge the updated map and sync counters through the locked helper:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --json "nativeTaskMap=$NATIVE_TASK_MAP_JSON" \
+     --set "nativeSyncFailureCount=$NATIVE_SYNC_FAILURE_COUNT" \
+     --set "nativeSyncEnabled=$NATIVE_SYNC_ENABLED"
+   ```
 
 If `nativeSyncEnabled` is `false`: skip all sync operations silently.
 
@@ -76,9 +83,10 @@ If `nativeSyncEnabled` is `false`: skip all sync operations silently.
 
 If taskIndex >= totalTasks:
 1. Verify all tasks marked [x] in tasks.md
-2. Delete state file explicitly:
+2. Reconcile prototypes, verify `activePrototypes` is empty, then delete state through the lock:
    ```bash
-   rm -f "$SPEC_PATH/.ralph-state.json"
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" delete-state \
+     --state "$SPEC_PATH/.ralph-state.json"
    ```
 3. Output: ALL_TASKS_COMPLETE
 4. STOP - do not delegate any task
@@ -442,7 +450,7 @@ After all 3 verification layers pass:
 
 After successful completion (TASK_COMPLETE for sequential or all parallel tasks complete):
 
-**CRITICAL: Always use jq merge pattern to preserve all existing fields (source, name, basePath, commitSpec, relatedSpecs, etc.). Never write a new object from scratch.**
+**CRITICAL: Always use `locked-state.py merge` to preserve all existing fields (source, name, basePath, commitSpec, relatedSpecs, activePrototypes, and unknown fields). Never write a new object from scratch.**
 
 **Sequential Update**:
 1. Read current .ralph-state.json
@@ -477,6 +485,16 @@ Updated fields (all other fields preserved as-is):
 }
 ```
 
+For either sequential or parallel values computed above, persist them only through the helper:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+  --state "$SPEC_PATH/.ralph-state.json" \
+  --set "taskIndex=$NEXT_TASK_INDEX" \
+  --set "taskIteration=1" \
+  --set "globalIteration=$NEXT_GLOBAL_ITERATION"
+```
+
 Check if all tasks complete:
 - If taskIndex >= totalTasks: proceed to Completion Signal
 - If taskIndex < totalTasks: continue to next iteration (loop re-invokes coordinator)
@@ -501,8 +519,9 @@ Commit after every task, but batch pushes to avoid excessive remote operations.
    - Phase boundary: current task's phase header differs from previous task's
    - Commit count: 5+ commits since last push
    - Approval gate: awaitingApproval about to be set
-3. If any condition met: `git push`
-4. Log push in .progress.md: "Pushed N commits (reason: phase boundary / batch limit / approval gate)"
+3. If any condition is met, run the Prototype Evidence Push Gate in `${CLAUDE_PLUGIN_ROOT}/references/commit-discipline.md`, then run `git push` only when that gate permits it.
+4. When the gate skips or denies the push, end every dependent PR, CI, review, and issue path. Do not run `gh pr create`, `gh pr merge`, `gh pr checks`, `gh pr view`, `gh api`, `gh run`, `gh issue`, remote review polling, issue writes, or later remote steps that depend on that push. Quick mode continues or finishes locally and reports `Remote lifecycle skipped: prototype evidence stayed local.` Normal mode waits at its authorization boundary.
+5. After a permitted push, preserve the existing normal remote lifecycle and log in .progress.md: "Pushed N commits (reason: phase boundary / batch limit / approval gate)"
 
 ## Progress Merge (Parallel Only)
 
@@ -568,7 +587,7 @@ Before outputting ALL_TASKS_COMPLETE:
 
 Before outputting:
 1. Verify all tasks marked [x] in tasks.md
-2. Delete .ralph-state.json (cleanup execution state)
+2. Reconcile prototype records, require an empty `activePrototypes` map, then call `locked-state.py delete-state` for `.ralph-state.json`
 3. Keep .progress.md (preserve learnings and history)
 4. **Cleanup orphaned temp progress files** (from interrupted parallel batches):
    ```bash
@@ -583,7 +602,7 @@ Before outputting:
    git add "$SPEC_PATH/tasks.md" "$SPEC_PATH/.progress.md" ./specs/.index/
    git diff --cached --quiet || git commit -m "chore(spec): final progress update for $spec"
    ```
-7. Check for PR and output link if exists: `gh pr view --json url -q .url 2>/dev/null`
+7. Check for a PR link with `gh pr view --json url -q .url 2>/dev/null` only while the permitted-push remote lifecycle is active; otherwise retain the remote-lifecycle-skipped report
 
 This signal terminates the Ralph Loop.
 
@@ -661,7 +680,8 @@ Extract the JSON payload:
 **Update State (modificationMap)**:
 
 ```bash
-jq --arg taskId "$TASK_ID" \
+STATE_JSON=$(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge --stdout --state "$SPEC_PATH/.ralph-state.json")
+UPDATED_STATE=$(jq --arg taskId "$TASK_ID" \
    --arg modId "$MOD_TASK_ID" \
    --arg reason "$REASONING" \
    --arg type "$MOD_TYPE" \
@@ -672,8 +692,13 @@ jq --arg taskId "$TASK_ID" \
    .modificationMap[$taskId].count += 1 |
    .modificationMap[$taskId].modifications += [{id: $modId, type: $type, reason: $reason}] |
    .totalTasks += $delta
-   ' "$SPEC_PATH/.ralph-state.json" > "$SPEC_PATH/.ralph-state.json.tmp" && \
-   mv "$SPEC_PATH/.ralph-state.json.tmp" "$SPEC_PATH/.ralph-state.json"
+   ' <<< "$STATE_JSON")
+MODIFICATION_MAP_JSON=$(jq -c '.modificationMap' <<< "$UPDATED_STATE")
+TOTAL_TASKS=$(jq -r '.totalTasks' <<< "$UPDATED_STATE")
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+  --state "$SPEC_PATH/.ralph-state.json" \
+  --json "modificationMap=$MODIFICATION_MAP_JSON" \
+  --set "totalTasks=$TOTAL_TASKS"
 ```
 
 > **Note**: Set `PROPOSED_COUNT` to the number of proposed tasks (e.g., `PROPOSED_COUNT=$(echo "$PROPOSED_TASKS" | jq 'length')`). For SPLIT_TASK this is N (the number of sub-tasks), for ADD_PREREQUISITE and ADD_FOLLOWUP this is 1.
@@ -700,7 +725,7 @@ When TASK_MODIFICATION_REQUEST is processed and new tasks are inserted into task
    - `TaskUpdate` original task with `addBlockedBy: [prerequisite task ID]`
 4. For ADD_FOLLOWUP:
    - `TaskCreate(subject: "<FR-11 format>", description, activeForm: "<FR-12 format>")` for followup, add returned ID to `nativeTaskMap`
-5. Update `nativeTaskMap` in .ralph-state.json with new entries
+5. Merge `nativeTaskMap` into `.ralph-state.json` with `locked-state.py merge --json "nativeTaskMap=$NATIVE_TASK_MAP_JSON"`
 6. Re-indexing: rebuild `nativeTaskMap` to match the updated tasks.md order.
    - Parse tasks.md in order after insertion.
    - Keep existing native task IDs for unchanged task identities. Match the leading stable subject ID: `X.Y`, or `V` followed by letters or digits, such as `V1`, `VF`, or `VE1`; never match title alone.
@@ -721,6 +746,8 @@ CRITICAL: Phase 5 is continuous autonomous PR management. Do NOT stop until all 
 PR Creation -> CI Monitoring -> Review Check -> Fix Issues -> Push -> Repeat
 ```
 
+Enter or continue this loop only after the Prototype Evidence Push Gate completes the required push. A skipped or denied push ends the dependent remote lifecycle. Quick mode completes applicable local criteria without questions and reports `Remote lifecycle skipped: prototype evidence stayed local.` Normal mode waits at the gate. Do not run `gh pr create`, `gh pr merge`, `gh pr checks`, `gh pr view`, `gh api`, `gh run`, `gh issue`, remote review polling, issue writes, or any other remote loop step after the gate blocks its push.
+
 **Step 1: Create PR (if not exists)**
 
 Delegate to spec-executor:
@@ -729,11 +756,11 @@ Task: Create pull request
 
 Do:
 1. Verify not on default branch: git branch --show-current
-2. Push branch: git push -u origin <branch>
-3. Create PR: gh pr create --title "feat: <spec>" --body "<summary>"
+2. Run the Prototype Evidence Push Gate in `${CLAUDE_PLUGIN_ROOT}/references/commit-discipline.md`, then push the branch only when permitted: git push -u origin <branch>
+3. Only after step 2 completes a permitted push, create the PR: gh pr create --title "feat: <spec>" --body "<summary>"
 
-Verify: gh pr view shows PR created
-Done when: PR URL returned
+Verify: after a permitted push, gh pr view shows the created PR; after a skipped or denied push, verify the local remote-lifecycle-skipped report
+Done when: PR URL returned after a permitted push, or applicable local criteria complete after a skipped or denied push
 Commit: None
 ```
 
@@ -748,8 +775,8 @@ While (CI checks not all green):
      - Create new Phase 5.X task in tasks.md
      - Delegate new task to spec-executor with task index and Files list
      - Wait for TASK_COMPLETE
-     - Push fixes (if not already pushed by spec-executor)
-     - Restart wait cycle
+     - Run the Prototype Evidence Push Gate, then push fixes if the gate permits and spec-executor has not pushed them
+     - Restart the wait cycle only after the gate completes the fix push; otherwise end the dependent remote lifecycle and finish from local criteria
   4. If pending:
      - Continue waiting
   5. If all green:
@@ -768,19 +795,19 @@ While (CI checks not all green):
    - Create tasks from reviews (add to tasks.md as Phase 5.X)
    - Delegate each to spec-executor
    - Wait for completion
-   - Push fixes
-   - Return to Step 2 (re-check CI)
+   - Run the Prototype Evidence Push Gate, then push fixes only when permitted
+   - Return to Step 2 only after the permitted push; otherwise end the dependent remote lifecycle and finish from local criteria
 4. If no unresolved reviews/comments:
    - Proceed to Step 4
 ```
 
 **Step 4: Final Validation**
 
-All must be true:
+All applicable criteria must be true:
 - All Phase 1-4 tasks complete (checked [x])
-- All Phase 5 tasks complete
-- CI checks all green
-- No unresolved review comments
+- All Phase 5 tasks complete or marked skipped by the remote gate
+- CI checks all green while the remote lifecycle is active
+- No unresolved review comments while the remote lifecycle is active
 - Zero test regressions (all existing tests pass)
 - Code is modular/reusable (verified in .progress.md)
 
@@ -788,8 +815,8 @@ All must be true:
 
 When all Step 4 criteria met:
 1. Update .progress.md with final state
-2. Delete .ralph-state.json
-3. Get PR URL: `gh pr view --json url -q .url`
+2. Reconcile prototype records, require `activePrototypes` to be empty, and delete `.ralph-state.json` with `locked-state.py delete-state`
+3. Get the PR URL with `gh pr view --json url -q .url` only while the permitted-push remote lifecycle is active; otherwise retain the remote-lifecycle-skipped report
 4. Output: ALL_TASKS_COMPLETE
 5. Output: PR link
 

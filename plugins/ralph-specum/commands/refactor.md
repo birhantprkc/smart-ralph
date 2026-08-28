@@ -51,6 +51,22 @@ Implementation learnings from .progress.md:
 - [Key learning 2]
 ```
 
+### Prototype Refactor Gate
+
+After resolving the ordered file list above and before any refactor dispatch:
+
+1. Whenever `.ralph-state.json` exists, reconcile candidates and finals once, even when `activePrototypes` is absent or empty:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/prototype-records.py" reconcile --base-path "$SPEC_PATH" --state "$SPEC_PATH/.ralph-state.json"
+   ```
+2. For each resolved file in scope, run selection with that exact file as both target and path:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/prototype-records.py" select-downstream --base-path "$SPEC_PATH" --state "$SPEC_PATH/.ralph-state.json" --target "$FILE" --path "$FILE"
+   ```
+3. Stop that file's refactor dispatch when `activeBlockers` targets the file or transition, when its task index appears in `staleTaskIndexes`, or when `staleArtifacts` contains the file or an upstream dependency.
+4. Preserve a file only when its matching `targetDecisions` entry has `proofAvailable: true` and `eligible: true`. Missing dependency or approved-transfer proof blocks that file conservatively.
+5. When refactor resumes execution, restore `taskIndex` from the relevant entry's `returnTaskIndex` before task dispatch.
+
 ## Step 3: File-by-File Review
 
 Process files in order: requirements -> design -> tasks. For each file in scope:
@@ -109,15 +125,26 @@ If "Regenerate" selected, delegate to the original agent (architect-reviewer for
 
 ### Update State
 
-1. Update `.ralph-state.json`: keep existing phase, reset `taskIndex` to 0 if tasks modified, set `awaitingApproval: true`
+1. Merge through `locked-state.py` without supplying `phase`, so the existing phase and unknown fields remain unchanged:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "awaitingApproval=true"
+   # If tasks changed, run a second locked merge with --set "taskIndex=0".
+   ```
 2. Append refactoring summary to `.progress.md`
 
 ### Commit (if enabled)
 
-Read `commitSpec` from `.ralph-state.json`. If true:
+Read `commitSpec` from `.ralph-state.json`. It authorizes the local commit only. If true:
 ```bash
 git add ./specs/$spec/
 git commit -m "spec($spec): refactor specifications"
+```
+
+Run the Prototype Evidence Push Gate from `${CLAUDE_PLUGIN_ROOT}/references/commit-discipline.md` immediately before the existing push. If outbound commits contain `**/prototypes/*.md`, require separate explicit authorization naming every exact record; otherwise preserve the existing push behavior.
+
+```bash
 git push -u origin $(git branch --show-current)
 ```
 If commit or push fails, display warning but continue.
@@ -133,7 +160,7 @@ Updated files:
 Cascade updates:
 - [any cascade updates made]
 
-[If commitSpec: "Changes committed and pushed."]
+[If commitSpec: report the local commit and report a push only when the Prototype Evidence Push Gate permitted and completed it.]
 
 Next steps:
 - Review updated spec files

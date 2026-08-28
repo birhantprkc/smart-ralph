@@ -15,6 +15,7 @@ ralph-specum-start
 ralph-specum-triage
 ralph-specum-research
 ralph-specum-requirements
+ralph-specum-prototype
 ralph-specum-design
 ralph-specum-tasks
 ralph-specum-implement
@@ -34,6 +35,7 @@ ralph-specum-start
 ralph-specum-triage
 ralph-specum-research
 ralph-specum-requirements
+ralph-specum-prototype
 ralph-specum-design
 ralph-specum-tasks
 ralph-specum-implement
@@ -115,14 +117,19 @@ for skill in (ROOT / "plugins/ralph-specum-codex/skills").glob("ralph-specum*"):
     [ -f "$proot/references/state-contract.md" ]
     [ -f "$proot/references/path-resolution.md" ]
     [ -f "$proot/references/parity-matrix.md" ]
+    [ -f "$proot/references/prototype-coordinator.md" ]
+    [ -f "$proot/templates/prototype.md" ]
+    [ -f "$proot/scripts/locked_state.py" ]
     [ -f "$proot/scripts/merge_state.py" ]
+    [ -f "$proot/scripts/prototype_harness.py" ]
+    [ -f "$proot/scripts/prototype_records.py" ]
     [ -f "$proot/scripts/count_tasks.py" ]
     [ -f "$proot/scripts/resolve_spec_paths.py" ]
     [ -f "$proot/assets/bootstrap/AGENTS.md" ]
     [ -f "$proot/assets/bootstrap/ralph-specum.local.md" ]
 }
 
-@test "codex platform: helper skills stay self-contained" {
+@test "codex platform: skills resolve packaged resources without consumer-repo paths" {
     local root skill skill_text metadata_text
     root="$(plugin_root)"
 
@@ -130,13 +137,50 @@ for skill in (ROOT / "plugins/ralph-specum-codex/skills").glob("ralph-specum*"):
         skill_text="$(<"$root/skills/$skill/SKILL.md")"
         metadata_text="$(<"$root/skills/$skill/agents/openai.yaml")"
 
-        [[ "$skill_text" != *"../"* ]]
         [[ "$skill_text" != *"/home/"* ]]
-        [[ "$skill_text" != *"plugins/ralph-specum-codex/skills/ralph-specum/"* ]]
+        [[ "$skill_text" != *"plugins/ralph-specum-codex/scripts/"* ]]
+        [[ "$skill_text" != *"plugins/ralph-specum-codex/references/"* ]]
         [[ "$metadata_text" != *"../"* ]]
         [[ "$metadata_text" != *"/home/"* ]]
         [[ "$metadata_text" != *"plugins/ralph-specum-codex/skills/ralph-specum/"* ]]
     done < <(helper_codex_skills)
+
+    skill_text="$(<"$root/skills/ralph-specum-prototype/SKILL.md")"
+    [[ "$skill_text" == *'../../references/prototype-coordinator.md'* ]]
+    [[ "$skill_text" == *'RALPH_CODEX_PLUGIN_ROOT'* ]]
+
+    skill_text="$(<"$root/skills/ralph-specum/SKILL.md")"
+    [[ "$skill_text" == *'../../references/workflow.md'* ]]
+    [[ "$skill_text" == *'../../references/prototype-coordinator.md'* ]]
+    [[ "$skill_text" == *'RALPH_CODEX_PLUGIN_ROOT'* ]]
+
+    run rg -n 'plugins/ralph-specum-codex/(scripts|references)' "$root/skills" "$root/references"
+    [ "$status" -eq 1 ]
+}
+
+@test "codex platform: prototype coordinator helpers use the installed plugin root" {
+    local root coordinator
+    root="$(plugin_root)"
+    coordinator="$root/references/prototype-coordinator.md"
+
+    grep -q 'Derive `RALPH_CODEX_PLUGIN_ROOT` from this loaded reference' "$coordinator"
+    grep -q '\$RALPH_CODEX_PLUGIN_ROOT/scripts/resolve_spec_paths.py' "$coordinator"
+    grep -q '\$RALPH_CODEX_PLUGIN_ROOT/scripts/locked_state.py' "$coordinator"
+    grep -q '\$RALPH_CODEX_PLUGIN_ROOT/scripts/prototype_records.py' "$coordinator"
+    ! grep -q 'plugins/ralph-specum-codex/scripts/' "$coordinator"
+}
+
+@test "codex platform: installed template references use the plugin root templates directory" {
+    local root primary workflow
+    root="$(plugin_root)"
+    primary="$root/skills/ralph-specum/SKILL.md"
+    workflow="$root/references/workflow.md"
+
+    grep -Fq '$RALPH_CODEX_PLUGIN_ROOT/templates/' "$primary"
+    grep -Fq '$RALPH_CODEX_PLUGIN_ROOT/templates/' "$workflow"
+
+    run rg -n 'assets/templates' "$primary" "$workflow"
+    [ "$status" -eq 1 ]
 }
 
 @test "codex platform: docs describe the packaged distribution" {
@@ -232,6 +276,7 @@ required_tokens = {
     "triage": "| Triage |",
     "research": "| Research |",
     "requirements": "| Requirements |",
+    "prototype": "| Prototype |",
     "design": "| Design |",
     "tasks": "| Tasks |",
     "implement": "| Implement |",
@@ -256,11 +301,11 @@ for command, token in required_tokens.items():
     assert_python '
 expected = {
     "ralph-specum": ["approve current artifact", "request changes", "continue to <named next step>"],
-    "ralph-specum-start": ["wait for explicit direction", "research"],
-    "ralph-specum-research": ["approve current artifact", "continue to requirements"],
-    "ralph-specum-requirements": ["approve current artifact", "continue to design"],
-    "ralph-specum-design": ["approve current artifact", "continue to tasks"],
-    "ralph-specum-tasks": ["approve current artifact", "continue to implementation"],
+    "ralph-specum-start": ["wait for explicit direction", "reconcile prototype records"],
+    "ralph-specum-research": ["continue to requirements", "continue to prototype", "request changes"],
+    "ralph-specum-requirements": ["continue to design", "continue to prototype", "request changes"],
+    "ralph-specum-design": ["coordinator-selected prototype evidence", "Write design.md directly", "parent coordinator"],
+    "ralph-specum-tasks": ["select valid prototype evidence", "active prototype blockers", "next implementation decision"],
     "ralph-specum-cancel": ["whether anything was removed", "exactly what if so"],
     "ralph-specum-triage": ["approve current artifact", "continue to the next spec"],
     "ralph-specum-refactor": ["approve current artifact", "continue to implementation"],
@@ -283,6 +328,7 @@ pairs = {
     "triage": ["specs/_epics", ".current-epic", ".epic-state.json", "dependencies"],
     "research": ["brainstorming", "research.md", "verification tooling"],
     "requirements": ["brainstorming", "requirements.md", "awaitingApproval"],
+    "prototype": ["activePrototypes", "prototype_records.py", "agentId", "create_thread"],
     "design": ["brainstorming", "design.md", "awaitingApproval"],
     "tasks": ["granularity", "[P]", "[VERIFY]", "VE tasks", "taskIndex: first incomplete or totalTasks"],
     "implement": ["[P]", "[VERIFY]", "VE tasks", "tasks.md", "approval", "quick mode", "explicit user direction", "file sets do not overlap", "Marker syntax must be explicitly present"],
@@ -299,6 +345,77 @@ for name, tokens in pairs.items():
     text = (ROOT / f"plugins/ralph-specum-codex/skills/ralph-specum-{name}/SKILL.md").read_text()
     for token in tokens:
         assert token in text, {"skill": name, "token": token}
+' "$root"
+}
+
+@test "codex platform: implementation counters and cancellation distinguish recovery-only entries" {
+    local root
+    root="$(repo_root)"
+
+    assert_python '
+claude_implement = (ROOT / "plugins/ralph-specum/commands/implement.md").read_text()
+codex_implement = (ROOT / "plugins/ralph-specum-codex/skills/ralph-specum-implement/SKILL.md").read_text()
+claude_cancel = (ROOT / "plugins/ralph-specum/commands/cancel.md").read_text()
+codex_cancel = (ROOT / "plugins/ralph-specum-codex/skills/ralph-specum-cancel/SKILL.md").read_text()
+claude_start = (ROOT / "plugins/ralph-specum/commands/start.md").read_text()
+codex_start = (ROOT / "plugins/ralph-specum-codex/skills/ralph-specum-start/SKILL.md").read_text()
+
+for text in (claude_implement, codex_implement):
+    assert "ordered top-level task rows" in text
+    assert "parse `tasks.md` once" in text.lower()
+    assert "nested and example checkboxes" in text
+    assert "zero-based position of the first incomplete row" in text
+    assert "completed count" in text
+    assert "non-prefix" in text
+
+assert "TOTAL=$(grep" not in claude_implement
+assert "FIRST_INCOMPLETE=$((COMPLETED))" not in claude_implement
+
+import contextlib
+import io
+import re
+import tempfile
+import textwrap
+
+counter = re.search(r"TASK_COUNTS=\$\(python3 .*?<<.PY.\n(?P<body>.*?)\n   PY", claude_implement, re.DOTALL)
+assert counter, "embedded task counter not found"
+with tempfile.TemporaryDirectory() as directory:
+    tasks = Path(directory) / "tasks.md"
+    tasks.write_text("""# Tasks
+- [x] 1.1 completed first task
+  - [ ] nested acceptance item
+```markdown
+- [ ] 9.9 fenced example
+```
+- [ ] 1.2 first incomplete task
+- [x] 1.3 completed out of order
+- [ ] completion criterion without a task ID
+- [x] VF [VERIFY] final verification
+""")
+    old_argv = sys.argv
+    output = io.StringIO()
+    try:
+        sys.argv = ["counter", str(tasks)]
+        with contextlib.redirect_stdout(output):
+            exec(compile(textwrap.dedent(counter.group("body")), "task-counter", "exec"), {})
+    finally:
+        sys.argv = old_argv
+assert output.getvalue().strip() == "4\t3\t1", output.getvalue()
+
+for text in (claude_cancel, codex_cancel):
+    assert re.search(r"owner.*leaseToken.*both null or absent.*harnessRun\.id.*no builder is associated.*skip interrupt and release", text)
+    assert "no builder is associated" in text
+    assert "skip interrupt and release" in text
+    assert "inconsistent builder ownership" in text
+    assert "release-lease" in text
+    assert "only after the harness verifies" in text
+    assert "retain the lease and active entry" in text
+
+for text in (claude_start, codex_start):
+    assert "recovery-only entry" in text
+    assert "owner`, `leaseToken`, and `harnessRun.id` are all null or absent" in text
+    assert "skips interrupt and release" in text
+    assert "inconsistent builder ownership fails closed" in text
 ' "$root"
 }
 
@@ -394,6 +511,26 @@ for name in must_match_exactly:
 ' "$root"
 }
 
+@test "codex platform: prototype frontmatter schemas match and require structured staleness" {
+    local root
+    root="$(repo_root)"
+
+    assert_python '
+import json
+
+claude_schema = json.loads((ROOT / "plugins/ralph-specum/schemas/spec.schema.json").read_text())
+codex_schema = json.loads((ROOT / "plugins/ralph-specum-codex/schemas/spec.schema.json").read_text())
+claude_prototype = claude_schema["definitions"]["prototypeFrontmatter"]
+codex_prototype = codex_schema["definitions"]["prototypeFrontmatter"]
+
+assert claude_prototype == codex_prototype
+required = set(codex_prototype["required"])
+assert {"staleArtifacts", "staleTaskIndexes"} <= required
+assert codex_prototype["properties"]["staleArtifacts"]["items"]["type"] == "string"
+assert codex_prototype["properties"]["staleTaskIndexes"]["items"] == {"type": "integer", "minimum": 0}
+' "$root"
+}
+
 @test "codex platform: shared bootstrap and scripts expose current drift-sensitive fields" {
     local root
     root="$(repo_root)"
@@ -405,6 +542,9 @@ bootstrap = (ROOT / "plugins/ralph-specum-codex/assets/bootstrap/AGENTS.md").rea
 settings = (ROOT / "plugins/ralph-specum-codex/assets/bootstrap/ralph-specum.local.md").read_text()
 count_tasks = (ROOT / "plugins/ralph-specum-codex/scripts/count_tasks.py").read_text()
 merge_state = (ROOT / "plugins/ralph-specum-codex/scripts/merge_state.py").read_text()
+locked_state = (ROOT / "plugins/ralph-specum-codex/scripts/locked_state.py").read_text()
+prototype_records = (ROOT / "plugins/ralph-specum-codex/scripts/prototype_records.py").read_text()
+prototype_harness = (ROOT / "plugins/ralph-specum-codex/scripts/prototype_harness.py").read_text()
 resolve_paths = (ROOT / "plugins/ralph-specum-codex/scripts/resolve_spec_paths.py").read_text()
 frontmatter = settings.split("---", 2)[1]
 
@@ -415,10 +555,35 @@ assert re.search(r"(?m)^quick_mode_default\\s*:", frontmatter) is None
 assert "\"total\"" in count_tasks
 assert "\"completed\"" in count_tasks
 assert "\"next_index\"" in count_tasks
-assert "--set" in merge_state
-assert "--json" in merge_state
+assert "locked_main" in merge_state
+assert "[\"merge\"" in merge_state
+assert "activePrototypes" in locked_state
+assert "review-candidate" in prototype_records
+assert "select-downstream" in prototype_records
+assert "targetDecisions" in prototype_records
+assert "heartbeat" in prototype_harness
+assert "interrupt" in prototype_harness
 assert ".current-spec" in resolve_paths
 assert "specs_dirs" in resolve_paths
 assert "quick_mode_default" not in resolve_paths
+' "$root"
+}
+
+
+@test "codex platform: stop watcher selects terminal history and reports the blocking return index" {
+    local root
+    root="$(repo_root)"
+
+    assert_python '
+watcher = (ROOT / "plugins/ralph-specum-codex/hooks/stop-watcher.sh").read_text()
+assert "PROTOTYPE_HISTORY" in watcher
+assert "(.activePrototypes | type == \"object\"" in watcher
+assert "all(.[]; type == \"object\")" in watcher
+assert watcher.count("select-downstream") == 1
+assert "targetDecisions" in watcher
+assert "DEPENDENT_BLOCKERS" in watcher
+assert "returnTaskIndex" in watcher
+assert "activePrototypes[]? | .returnTaskIndex" not in watcher
+assert watcher.index("select-downstream") < watcher.index("# Completion must not discard")
 ' "$root"
 }

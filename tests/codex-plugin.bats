@@ -12,6 +12,7 @@ ralph-specum-start
 ralph-specum-triage
 ralph-specum-research
 ralph-specum-requirements
+ralph-specum-prototype
 ralph-specum-design
 ralph-specum-tasks
 ralph-specum-implement
@@ -31,6 +32,7 @@ ralph-specum-start
 ralph-specum-triage
 ralph-specum-research
 ralph-specum-requirements
+ralph-specum-prototype
 ralph-specum-design
 ralph-specum-tasks
 ralph-specum-implement
@@ -174,7 +176,7 @@ print('ok')
     grep -Fq 'Manual Fallback Path' "$workflow"
 }
 
-@test "codex plugin: all 15 skill directories have SKILL.md" {
+@test "codex plugin: all 16 skill directories have SKILL.md" {
     local root skill
     root="$(plugin_root)"
 
@@ -211,11 +213,12 @@ print('ok')
     done < <(helper_skills)
 }
 
-@test "codex plugin: 9 agent-config templates exist" {
+@test "codex plugin: 10 agent-config templates exist" {
     local root count
     root="$(plugin_root)"
     count=$(ls "$root/agent-configs/"*.toml.template 2>/dev/null | wc -l)
-    [ "$count" -eq 9 ]
+    [ "$count" -eq 10 ]
+    [ -f "$root/agent-configs/prototype-builder.toml.template" ]
 }
 
 @test "codex plugin: spec-executor template contains TASK_COMPLETE" {
@@ -240,16 +243,17 @@ print('ok')
     [ -x "$hook" ]
 }
 
-@test "codex plugin: all 4 reference files exist" {
+@test "codex plugin: all 5 reference files exist" {
     local root
     root="$(plugin_root)"
     [ -f "$root/references/workflow.md" ]
     [ -f "$root/references/state-contract.md" ]
     [ -f "$root/references/path-resolution.md" ]
     [ -f "$root/references/parity-matrix.md" ]
+    [ -f "$root/references/prototype-coordinator.md" ]
 }
 
-@test "codex plugin: all 10 template files exist" {
+@test "codex plugin: all 11 template files exist" {
     local root
     root="$(plugin_root)"
     [ -f "$root/templates/component-spec.md" ]
@@ -258,17 +262,21 @@ print('ok')
     [ -f "$root/templates/external-spec.md" ]
     [ -f "$root/templates/index-summary.md" ]
     [ -f "$root/templates/progress.md" ]
+    [ -f "$root/templates/prototype.md" ]
     [ -f "$root/templates/requirements.md" ]
     [ -f "$root/templates/research.md" ]
     [ -f "$root/templates/settings-template.md" ]
     [ -f "$root/templates/tasks.md" ]
 }
 
-@test "codex plugin: all 3 Python scripts exist" {
+@test "codex plugin: all 6 Python scripts exist" {
     local root
     root="$(plugin_root)"
     [ -f "$root/scripts/count_tasks.py" ]
+    [ -f "$root/scripts/locked_state.py" ]
     [ -f "$root/scripts/merge_state.py" ]
+    [ -f "$root/scripts/prototype_harness.py" ]
+    [ -f "$root/scripts/prototype_records.py" ]
     [ -f "$root/scripts/resolve_spec_paths.py" ]
 }
 

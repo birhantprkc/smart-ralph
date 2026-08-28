@@ -26,6 +26,8 @@ Smart Ralph creates research, requirements, design, and task files before implem
 
 The spec files stay in the project, so you can review or edit each phase before execution. Smart Ralph records progress between tasks and can resume after a stopped session.
 
+An optional prototype can test one focused design question without turning disposable source into production code.
+
 ```mermaid
 flowchart TD
     A["I want a feature!"] --> B{"/start detects scope"}
@@ -101,6 +103,7 @@ Claude Code uses `/ralph-specum:<name>`. Codex uses `$ralph-specum-<name>` and f
 | `/ralph-specum:triage [name] [goal]` | Split a large goal into an epic |
 | `/ralph-specum:research` | Run or repeat research |
 | `/ralph-specum:requirements` | Generate requirements from research |
+| `/ralph-specum:prototype` | Run or resume an optional prototype |
 | `/ralph-specum:design` | Generate the technical design |
 | `/ralph-specum:tasks` | Break the design into executable tasks |
 | `/ralph-specum:implement` | Execute tasks one at a time |
@@ -121,6 +124,7 @@ Smart Ralph gives each phase to a focused agent.
 | Triage | `triage-analyst` | Split features and map dependencies |
 | Research | `research-analyst` | Inspect the codebase and check feasibility |
 | Requirements | `product-manager` | Write user stories and acceptance criteria |
+| Prototype | `prototype-builder` | Test one design question with disposable evidence |
 | Design | `architect-reviewer` | Define architecture and trade-offs |
 | Tasks | `task-planner` | Create a POC-first task sequence |
 | Execution | `spec-executor` | Implement tasks and run quality gates |
@@ -138,6 +142,13 @@ Planning controls include:
 - `[P]` for low-conflict parallel tasks
 - `[VERIFY]` and VE tasks for explicit verification
 - approval checkpoints between spec phases outside quick mode
+
+### Optional prototypes
+
+- In normal mode, Smart Ralph may suggest a prototype after research or requirements. You can also run `/ralph-specum:prototype` or `$ralph-specum-prototype` at a safe phase boundary.
+- In quick mode, Smart Ralph asks no prototype questions, owns the decisions, and always continues to design after the prototype outcome.
+- Prototype source stays in a sibling worktree or eligible scratch directory. Quick mode transfers no source into the current checkout; normal mode transfers only paths you approve.
+- Reviewed terminal records are immutable. Local evidence does not authorize a push, remote branch, PR update, issue write, or record deletion.
 
 Smart Ralph stores progress in `.progress.md` and marks completed work in `tasks.md`. Each implementation task starts with fresh context.
 
@@ -178,6 +189,8 @@ specs/
 `-- my-feature/
     |-- .ralph-state.json
     |-- .progress.md
+    |-- prototypes/
+    |   `-- <id>.md
     |-- research.md
     |-- requirements.md
     |-- design.md

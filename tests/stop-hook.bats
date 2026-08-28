@@ -126,6 +126,38 @@ load 'helpers/setup.bash'
     assert_json_reason_contains "Recovery options"
 }
 
+@test "rejects a falsey non-object activePrototypes value" {
+    local state_file tmp_state
+    create_state_file "execution" 0 5 1
+    state_file="$TEST_WORKSPACE/specs/test-spec/.ralph-state.json"
+    tmp_state="$state_file.invalid-active"
+    jq '.activePrototypes = false' "$state_file" > "$tmp_state"
+    mv "$tmp_state" "$state_file"
+
+    run run_stop_watcher
+    [ "$status" -eq 0 ]
+    assert_json_block
+    assert_json_reason_contains "ERROR: Corrupt state file"
+}
+
+@test "rejects non-object activePrototypes entries before prototype reconciliation" {
+    local state_file tmp_state prototype_dir
+    create_state_file "execution" 0 5 1
+    state_file="$TEST_WORKSPACE/specs/test-spec/.ralph-state.json"
+    tmp_state="$state_file.invalid-active-entry"
+    prototype_dir="$TEST_WORKSPACE/specs/test-spec/prototypes"
+    jq '.activePrototypes = {"bad-entry": false}' "$state_file" > "$tmp_state"
+    mv "$tmp_state" "$state_file"
+    mkdir -p "$prototype_dir"
+    printf '%s\n' 'unreviewed candidate' > "$prototype_dir/.bad-entry.candidate.md"
+
+    run run_stop_watcher
+    [ "$status" -eq 0 ]
+    assert_json_block
+    assert_json_reason_contains "ERROR: Corrupt state file"
+    assert_output_not_contains "Continue spec"
+}
+
 # =============================================================================
 # Test: Missing jq -> exits gracefully
 # =============================================================================
@@ -530,10 +562,21 @@ More text")
 @test "both ALL_TASKS_COMPLETE detection paths call update-spec-index.sh" {
     # Structural test: verify both grep paths have the index update call
     local primary_count
-    primary_count=$(sed -n '/tail -500.*ALL_TASKS_COMPLETE/,/exit 0/p' "$STOP_WATCHER_SCRIPT" | grep -c 'update-spec-index.sh' || echo 0)
+    primary_count=$(sed -n '/tail -500.*ALL_TASKS_COMPLETE/,/# Fallback: check last 20 lines/p' "$STOP_WATCHER_SCRIPT" | grep -c 'update-spec-index.sh' || true)
     [ "$primary_count" -ge 1 ]
 
     local fallback_count
-    fallback_count=$(sed -n '/tail -20.*ALL_TASKS_COMPLETE/,/exit 0/p' "$STOP_WATCHER_SCRIPT" | grep -c 'update-spec-index.sh' || echo 0)
+    fallback_count=$(sed -n '/tail -20.*ALL_TASKS_COMPLETE/,/# Validate state file is readable JSON/p' "$STOP_WATCHER_SCRIPT" | grep -c 'update-spec-index.sh' || true)
     [ "$fallback_count" -ge 1 ]
+}
+
+@test "stop watcher selects prototype history and uses the blocking prototype return index" {
+    run bash -c "grep -q 'PROTOTYPE_HISTORY' '$STOP_WATCHER_SCRIPT' && \
+        grep -q 'targetDecisions' '$STOP_WATCHER_SCRIPT' && \
+        ! grep -Fq 'activePrototypes[]? | .returnTaskIndex' '$STOP_WATCHER_SCRIPT'"
+    [ "$status" -eq 0 ]
+
+    selection_line=$(grep -n '# Select whenever active or terminal prototype history exists.' "$STOP_WATCHER_SCRIPT" | cut -d: -f1)
+    completion_line=$(grep -n '# Check for ALL_TASKS_COMPLETE in transcript' "$STOP_WATCHER_SCRIPT" | cut -d: -f1)
+    [ "$selection_line" -lt "$completion_line" ]
 }

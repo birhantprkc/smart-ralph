@@ -28,8 +28,14 @@ Create a task for each item and complete in order:
 3. Check the resolved spec directory exists
 4. Read `.ralph-state.json`, reject simultaneous exact `--quick` and `--interactive`, and normalize persistent mode with `phase_gate.py mode`.
 5. If `research.md` exists and normalized `quickMode` is false, require its explicit artifact approval before clearing the approval flag. Exact quick mode continues with the validated file. When `research.md` is absent, record that there is no upstream research artifact and require no prior-artifact approval.
-6. Read context: `research.md` (if exists), `.progress.md`, original goal.
-7. Run skill discovery pass 1 if missing. Run pass 2 now when `research.md` exists and pass 2 is missing.
+6. Clear the approval flag through the locked helper while preserving every other field:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "awaitingApproval=false"
+   ```
+7. Read context: `research.md` (if exists), `.progress.md`, original goal.
+8. Run skill discovery pass 1 if missing. Run pass 2 now when `research.md` exists and pass 2 is missing.
 
 ## Step 2: Skill Load, Critical Grill, and Approval
 
@@ -95,7 +101,24 @@ Follow the full team lifecycle:
 <mandatory>
 **Review runs after generation in normal AND quick mode. Behavior branches on normalized persistent `quickMode` from state.** Must complete before the walkthrough; do not re-read raw `$ARGUMENTS` to choose review behavior.
 
-**Review delegation (both modes)**: Invoke `spec-reviewer` via Task tool. Include full requirements.md content, `artifactType: requirements`, `artifactPath: $SPEC_PATH/requirements.md`, iteration count, prior findings. Upstream: research.md.
+Before every requirements review delegation, run the deterministic lint from the coordinator's runtime-resolved `SPEC_PATH`. Keep the artifact path in the quoted variable expansion shown here; do not rebuild this command by inserting a path into its source:
+
+```bash
+LINT="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/hooks/scripts/lint-requirements.sh}"
+[ -f "$LINT" ] || LINT="plugins/ralph-specum/hooks/scripts/lint-requirements.sh"
+if [ -f "$LINT" ]; then
+  if REQUIREMENTS_LINT_OUTPUT=$(bash "$LINT" "$SPEC_PATH/requirements.md" 2>&1); then
+    REQUIREMENTS_LINT_EXIT=0
+  else
+    REQUIREMENTS_LINT_EXIT=$?
+  fi
+else
+  REQUIREMENTS_LINT_EXIT=unavailable
+  REQUIREMENTS_LINT_OUTPUT=""
+fi
+```
+
+**Review delegation (both modes)**: Invoke `spec-reviewer` via Task tool. Include full requirements.md content, `artifactType: requirements`, `artifactPath: $SPEC_PATH/requirements.md`, `requirementsLintExit: $REQUIREMENTS_LINT_EXIT`, the exact `requirementsLintOutput` as data, iteration count, and prior findings. Upstream: research.md. Re-run the coordinator lint after every quick-mode revision and before any user-requested re-review. When `requirementsLintExit` is `unavailable`, the reviewer applies its manual Degradation rule.
 
 ### Normal mode: single pass
 
@@ -165,36 +188,44 @@ The Validation block reports the statuses of the 8 rubric checks plus any judgme
 If normalized `quickMode` is true, skip to Step 6.
 
 Ask ONE question: "How do you want to proceed?" with these options via AskUserQuestion:
-1. **Approve** (Recommended) -- Accept artifact as-is, advance to next phase
-2. **Run review** -- Spawn spec-reviewer to validate against rubrics, show findings, then loop back to this choice
-3. **Request changes** -- Provide specific feedback to revise the artifact
+1. **Continue to design** (Recommended) -- Approve requirements and keep the normal phase path
+2. **continue to prototype** -- Approve requirements and run one suggested prototype before design
+3. **Run review** -- Spawn spec-reviewer to validate against rubrics, show findings, then loop back to this choice
+4. **Request changes** -- Provide specific feedback to revise the artifact
 
-**If "Approve"**: proceed to Step 6.
-**If "Run review"**: Invoke spec-reviewer via Task tool with full requirements.md content (upstream: research.md). Display findings table. If REVIEW_PASS, note it. If REVIEW_FAIL, show feedback. Then loop back to this same 3-choice question (user decides next action).
+**If "Continue to design"**: set `nextAction: design`, then proceed to Step 6 without creating a prototype.
+**If "continue to prototype"**: set `nextAction: prototype`, treat requirements as approved, then proceed to Step 6.
+**If "Run review"**: Invoke spec-reviewer via Task tool with full requirements.md content (upstream: research.md). Display findings table. If REVIEW_PASS, note it. If REVIEW_FAIL, show feedback. Then loop back to this same 4-choice question (user decides next action).
 **If "Request changes", "Other", or `apply the changes`**:
 1. Apply already-recorded review or revision feedback immediately. Ask one focused change question only when no pending feedback exists.
 2. Run `check-delegation`, then re-invoke product-manager using the **cleanup-and-recreate** team pattern with the same complete packet and a new unique artifact agent ID, current artifact, and feedback
-3. Re-run the Step 4 review behavior for the current mode on the revised artifact.
-4. Re-display the walkthrough with its updated Validation block and ask the same approval question again. Loop until approved.
+3. Re-run the deterministic lint and Step 4 review behavior for the current mode on the revised artifact.
+4. Re-display the walkthrough with its updated Validation block and ask the same 4-choice approval question again. Loop until the user selects a continue option.
 
 ## Step 6: Finalize
 
 ### Update State
 
-1. **Merge** into `.ralph-state.json` (preserve all existing fields):
+1. **Merge** into `.ralph-state.json` through the locked helper (preserve all existing and unknown fields):
    ```bash
-   jq '. + {"phase": "requirements", "awaitingApproval": true}' \
-     "$SPEC_PATH/.ralph-state.json" > "$SPEC_PATH/.ralph-state.json.tmp" && \
-     mv "$SPEC_PATH/.ralph-state.json.tmp" "$SPEC_PATH/.ralph-state.json"
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/locked-state.py" merge \
+     --state "$SPEC_PATH/.ralph-state.json" \
+     --set "phase=requirements" \
+     --set "awaitingApproval=true"
    ```
 2. Update `.progress.md`: retain the explicit research approval and set current phase
 
 ### Commit Spec (if enabled)
 
-Read `commitSpec` from `.ralph-state.json`. If true:
+Read `commitSpec` from `.ralph-state.json`. It authorizes the local commit only. If true:
 ```bash
 git add "$SPEC_PATH/requirements.md"
 git commit -m "spec($spec): add requirements"
+```
+
+In quick mode, skip only this push: do not ask a remote question, do not push, and continue the quick phase flow. In normal mode, run the Prototype Evidence Push Gate from `${CLAUDE_PLUGIN_ROOT}/references/commit-discipline.md` immediately before the existing push. If outbound commits contain `**/prototypes/*.md`, require separate explicit authorization naming every exact record; otherwise preserve the existing push behavior.
+
+```bash
 git push -u origin $(git branch --show-current)
 ```
 If commit or push fails, display warning but continue.
@@ -206,7 +237,17 @@ If commit or push fails, display warning but continue.
 
 (Does not apply when normalized quick mode is authorized.)
 
+If `nextAction: prototype`:
+1. Invoke `/ralph-specum:prototype --suggested --return-phase design` with the resolved `basePath` at this phase boundary.
+2. Let the prototype coordinator own resume, review, verdict, cleanup, publication, and handoff.
+3. End after the coordinator returns to design. Do not generate design in this command.
+
+Otherwise:
 1. Display: `-> Next: Run /ralph-specum:design`
-2. End your response immediately
-3. Wait for user to explicitly run `/ralph-specum:design`
+2. End your response immediately.
+3. Wait for the user to run `/ralph-specum:design`.
 </mandatory>
+
+### Quick continuation
+
+When `--quick` is active, do not ask the approval question above. After Step 6, execute the single Post-Requirements Prototype Gate in `${CLAUDE_PLUGIN_ROOT}/references/quick-mode.md`, then continue to design for every prototype outcome. That reference owns the only quick prototype call site; do not invoke it a second time here.

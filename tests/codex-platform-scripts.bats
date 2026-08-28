@@ -12,6 +12,22 @@ resolve_spec_paths_script() {
     echo "$(repo_root)/plugins/ralph-specum-codex/scripts/resolve_spec_paths.py"
 }
 
+prototype_harness_script() {
+    echo "$(repo_root)/plugins/ralph-specum-codex/scripts/prototype_harness.py"
+}
+
+locked_state_script() {
+    echo "$(repo_root)/plugins/ralph-specum-codex/scripts/locked_state.py"
+}
+
+prototype_records_script() {
+    echo "$(repo_root)/plugins/ralph-specum-codex/scripts/prototype_records.py"
+}
+
+claude_plugin_root() {
+    echo "$(repo_root)/plugins/ralph-specum"
+}
+
 json_query() {
     local path
     path="$1"
@@ -34,6 +50,22 @@ json_length() {
     python3 -c 'import json, sys; print(len(json.load(sys.stdin)))'
 }
 
+remember_harness_pid() {
+    printf '%s\n' "$1" >> "$TEST_REPO/harness-pids"
+}
+
+wait_for_pid_exit() {
+    local pid attempt
+    pid="$1"
+    for attempt in $(seq 1 100); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.02
+    done
+    return 1
+}
+
 write_crlf_file() {
     local path
     path="$1"
@@ -44,10 +76,85 @@ write_crlf_file() {
 setup() {
     TEST_REPO="$(mktemp -d)"
     export TEST_REPO
+    export PYTHONDONTWRITEBYTECODE=1
     mkdir -p "$TEST_REPO/.claude"
 }
 
+@test "codex scripts: prototype helper inventory exposes locked state records and harness CLIs" {
+    run python3 "$(locked_state_script)" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"upsert-prototype"* ]]
+    [[ "$output" == *"claim-builder"* ]]
+
+    run python3 "$(prototype_records_script)" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"review-candidate"* ]]
+    [[ "$output" == *"select-downstream"* ]]
+
+    run python3 "$(prototype_harness_script)" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"heartbeat"* ]]
+    [[ "$output" == *"interrupt"* ]]
+}
+
+@test "claude package: isolated marketplace source runs each Python helper" {
+    local install_root plugin_root state_file phase current_task
+    install_root="$TEST_REPO/install"
+    plugin_root="$install_root/ralph-specum"
+    state_file="$TEST_REPO/spec/.ralph-state.json"
+    mkdir -p "$install_root"
+    cp -R "$(claude_plugin_root)" "$plugin_root"
+
+    [ ! -e "$install_root/ralph-specum-codex" ]
+
+    run env -u PYTHONDONTWRITEBYTECODE python3 "$plugin_root/hooks/scripts/locked-state.py" merge \
+        --state "$state_file" \
+        --set "phase=research" \
+        --set "currentTask=2"
+    [ "$status" -eq 0 ]
+
+    phase="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["phase"])' "$state_file")"
+    current_task="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["currentTask"])' "$state_file")"
+    [ "$phase" = "research" ]
+    [ "$current_task" = "2" ]
+
+    run env -u PYTHONDONTWRITEBYTECODE python3 "$plugin_root/hooks/scripts/prototype-records.py" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"review-candidate"* ]]
+
+    run env -u PYTHONDONTWRITEBYTECODE python3 "$plugin_root/hooks/scripts/prototype-harness.py" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"heartbeat"* ]]
+
+    run find "$plugin_root" -type d -name __pycache__ -print
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "workflow: all Ralph Specum files and Ralph Speckit shell files trigger Bats" {
+    local workflow push_specum_count push_shell_count pull_request_specum_count pull_request_shell_count
+    workflow="$(repo_root)/.github/workflows/bats-tests.yml"
+
+    push_specum_count="$(sed -n '/^  push:/,/^  pull_request:/p' "$workflow" | grep -Fxc "      - 'plugins/ralph-specum/**'")"
+    push_shell_count="$(sed -n '/^  push:/,/^  pull_request:/p' "$workflow" | grep -Fxc "      - 'plugins/**/*.sh'")"
+    pull_request_specum_count="$(sed -n '/^  pull_request:/,/^jobs:/p' "$workflow" | grep -Fxc "      - 'plugins/ralph-specum/**'")"
+    pull_request_shell_count="$(sed -n '/^  pull_request:/,/^jobs:/p' "$workflow" | grep -Fxc "      - 'plugins/**/*.sh'")"
+
+    [ "$push_specum_count" -eq 1 ]
+    [ "$push_shell_count" -eq 1 ]
+    [ "$pull_request_specum_count" -eq 1 ]
+    [ "$pull_request_shell_count" -eq 1 ]
+}
+
 teardown() {
+    local pid
+    if [ -f "$TEST_REPO/harness-pids" ]; then
+        while IFS= read -r pid; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done < "$TEST_REPO/harness-pids"
+    fi
     if [ -n "$TEST_REPO" ] && [ -d "$TEST_REPO" ]; then
         rm -rf "$TEST_REPO"
     fi
@@ -59,8 +166,31 @@ teardown() {
     state_file="$TEST_REPO/state.json"
 
     run python3 "$script" "$state_file" --json "relatedSpecs={bad"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 2 ]
     [[ "$output" == *"Invalid JSON for 'relatedSpecs':"* ]]
+    [[ "$output" != *"Traceback"* ]]
+}
+
+@test "codex scripts: merge_state translates legacy bare assignments" {
+    local script state_file
+    script="$(merge_state_script)"
+    state_file="$TEST_REPO/state.json"
+
+    run python3 "$script" "$state_file" phase=design awaitingApproval=true
+    [ "$status" -eq 0 ]
+    run python3 "$script" merge --state "$state_file" currentTask=4
+    [ "$status" -eq 0 ]
+
+    run python3 - "$state_file" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+assert state["phase"] == "design"
+assert state["awaitingApproval"] is True
+assert state["currentTask"] == 4
+PY
+    [ "$status" -eq 0 ]
 }
 
 @test "codex scripts: merge_state rejects malformed existing state files" {
@@ -70,8 +200,9 @@ teardown() {
     printf '{ bad\n' > "$state_file"
 
     run python3 "$script" "$state_file" --set "phase=execution"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 2 ]
     [[ "$output" == *"State file is not valid JSON:"* ]]
+    [[ "$output" != *"Traceback"* ]]
 }
 
 @test "codex scripts: merge_state writes atomically without tmp leftovers" {
@@ -235,4 +366,308 @@ EOF
 
     default_dir="$(json_query default_dir <<< "$output")"
     [ "$default_dir" = "./specs" ]
+}
+
+@test "codex prototype harness: launch wait and status return completed output" {
+    local script registry pid
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-complete \
+        --kind codex_agent \
+        --agent-id child-complete \
+        --command-json '["python3","-c","print(\"builder complete\")"]' \
+        --soft-timeout 1 \
+        --activity-extension 1 \
+        --hard-timeout 2
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "launched" ]
+    [ "$(json_query agentId <<< "$output")" = "child-complete" ]
+    pid="$(json_query pid <<< "$output")"
+    remember_harness_pid "$pid"
+
+    run python3 "$script" wait --registry "$registry" --id codex-complete --until-seconds 1 --poll-seconds 0.02
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "completed" ]
+    [[ "$(json_query output <<< "$output")" == *"builder complete"* ]]
+
+    run python3 "$script" status --registry "$registry" --id codex-complete
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "completed" ]
+    wait_for_pid_exit "$pid"
+}
+
+@test "codex prototype harness: heartbeat extends activity and interrupt stops the child" {
+    local script registry pid launched heartbeat
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-live \
+        --kind codex_agent \
+        --agent-id child-live \
+        --command-json '["python3","-c","import time; time.sleep(30)"]' \
+        --soft-timeout 0.4 \
+        --activity-extension 1 \
+        --hard-timeout 3
+    [ "$status" -eq 0 ]
+    launched="$output"
+    pid="$(json_query pid <<< "$launched")"
+    remember_harness_pid "$pid"
+
+    run python3 "$script" heartbeat --registry "$registry" --id codex-live
+    [ "$status" -eq 0 ]
+    heartbeat="$output"
+    [ "$(json_query outcome <<< "$heartbeat")" = "heartbeat" ]
+    python3 - "$launched" "$heartbeat" <<'PY'
+import json, sys
+before, after = map(json.loads, sys.argv[1:])
+assert after["rollingDeadlineEpoch"] > before["rollingDeadlineEpoch"]
+PY
+
+    run python3 "$script" status --registry "$registry" --id codex-live
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "running" ]
+
+    run python3 "$script" interrupt --registry "$registry" --id codex-live
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "stopped" ]
+    wait_for_pid_exit "$pid"
+}
+
+@test "codex prototype harness: POSIX interrupt verifies the full process tree exits" {
+    local script registry pid child_pid interrupt_status interrupt_output root_alive child_alive attempt
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-posix-tree \
+        --kind codex_agent \
+        --agent-id child-posix-tree \
+        --command-json '["python3","-c","import signal,subprocess,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); child=subprocess.Popen([sys.executable,\"-c\",\"import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)\"]); print(child.pid,flush=True); time.sleep(30)"]' \
+        --soft-timeout 5 \
+        --activity-extension 5 \
+        --hard-timeout 10
+    [ "$status" -eq 0 ]
+    pid="$(json_query pid <<< "$output")"
+    remember_harness_pid "$pid"
+
+    child_pid=""
+    for attempt in $(seq 1 100); do
+        child_pid="$(tr -d '[:space:]' < "$registry/codex-posix-tree.output")"
+        [[ "$child_pid" =~ ^[0-9]+$ ]] && break
+        sleep 0.02
+    done
+    [[ "$child_pid" =~ ^[0-9]+$ ]]
+
+    run python3 "$script" interrupt --registry "$registry" --id codex-posix-tree
+    interrupt_status="$status"
+    interrupt_output="$output"
+    root_alive=0
+    child_alive=0
+    kill -0 "$pid" 2>/dev/null && root_alive=1
+    kill -0 "$child_pid" 2>/dev/null && child_alive=1
+
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    kill -KILL "$child_pid" 2>/dev/null || true
+
+    [ "$interrupt_status" -eq 0 ]
+    [ "$(json_query outcome <<< "$interrupt_output")" = "stopped" ]
+    [ "$root_alive" -eq 0 ]
+    [ "$child_alive" -eq 0 ]
+}
+
+@test "codex prototype harness: early heartbeat and output activity never shorten the rolling deadline" {
+    local script registry pid launched heartbeat waited
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-monotonic-heartbeat \
+        --kind codex_agent \
+        --agent-id child-monotonic-heartbeat \
+        --command-json '["python3","-c","import time; time.sleep(30)"]' \
+        --soft-timeout 5 \
+        --activity-extension 1 \
+        --hard-timeout 10
+    [ "$status" -eq 0 ]
+    launched="$output"
+    pid="$(json_query pid <<< "$launched")"
+    remember_harness_pid "$pid"
+
+    run python3 "$script" heartbeat --registry "$registry" --id codex-monotonic-heartbeat
+    [ "$status" -eq 0 ]
+    heartbeat="$output"
+    python3 - "$launched" "$heartbeat" <<'PY'
+import json, sys
+before, after = map(json.loads, sys.argv[1:])
+assert after["rollingDeadlineEpoch"] >= before["rollingDeadlineEpoch"]
+PY
+    python3 "$script" interrupt --registry "$registry" --id codex-monotonic-heartbeat >/dev/null
+    wait_for_pid_exit "$pid"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-monotonic-output \
+        --kind codex_agent \
+        --agent-id child-monotonic-output \
+        --command-json '["python3","-c","import time; print(\"activity\", flush=True); time.sleep(30)"]' \
+        --soft-timeout 5 \
+        --activity-extension 1 \
+        --hard-timeout 10
+    [ "$status" -eq 0 ]
+    launched="$output"
+    pid="$(json_query pid <<< "$launched")"
+    remember_harness_pid "$pid"
+
+    run python3 "$script" wait --registry "$registry" --id codex-monotonic-output --until-seconds 0.2 --poll-seconds 0.02
+    [ "$status" -eq 0 ]
+    waited="$output"
+    [ "$(json_query outcome <<< "$waited")" = "still-running" ]
+    python3 - "$launched" "$waited" <<'PY'
+import json, sys
+before, after = map(json.loads, sys.argv[1:])
+assert "lastOutputMtime" in after
+assert after["rollingDeadlineEpoch"] >= before["rollingDeadlineEpoch"]
+PY
+    python3 "$script" interrupt --registry "$registry" --id codex-monotonic-output >/dev/null
+    wait_for_pid_exit "$pid"
+}
+
+@test "codex prototype harness: resolver-approved builder execution counts launch and out-of-range counts fail" {
+    local script registry pid
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-five-executions \
+        --kind codex_agent \
+        --agent-id child-five-executions \
+        --command-json '["python3","-c","import time; time.sleep(30)"]' \
+        --builder-execution-attempt 5 \
+        --max-builder-executions 5
+    [ "$status" -eq 0 ]
+    [ "$(json_query builderExecutionAttempt <<< "$output")" -eq 5 ]
+    [ "$(json_query maxBuilderExecutions <<< "$output")" -eq 5 ]
+    pid="$(json_query pid <<< "$output")"
+    remember_harness_pid "$pid"
+    python3 "$script" interrupt --registry "$registry" --id codex-five-executions >/dev/null
+    wait_for_pid_exit "$pid"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-six-executions \
+        --kind codex_agent \
+        --agent-id child-six-executions \
+        --command-json '["python3","-c","print(1)"]' \
+        --max-builder-executions 6
+    [ "$status" -eq 2 ]
+    [ "$(json_query outcome <<< "$output")" = "unavailable-control" ]
+}
+
+@test "codex prototype harness: soft timeout requires interrupt and leaves no child" {
+    local script registry pid
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-soft \
+        --kind codex_agent \
+        --agent-id child-soft \
+        --command-json '["python3","-c","import time; time.sleep(30)"]' \
+        --soft-timeout 0.15 \
+        --activity-extension 0.15 \
+        --hard-timeout 3
+    [ "$status" -eq 0 ]
+    pid="$(json_query pid <<< "$output")"
+    remember_harness_pid "$pid"
+
+    run python3 "$script" wait --registry "$registry" --id codex-soft --until-seconds 0.6 --poll-seconds 0.02
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "timeout" ]
+    [ "$(json_query hard <<< "$output")" = "false" ]
+
+    run python3 "$script" interrupt --registry "$registry" --id codex-soft
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "stopped" ]
+    wait_for_pid_exit "$pid"
+}
+
+@test "codex prototype harness: hard timeout terminates the child" {
+    local script registry pid
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-hard \
+        --kind codex_agent \
+        --agent-id child-hard \
+        --command-json '["python3","-c","import time; time.sleep(30)"]' \
+        --soft-timeout 0.2 \
+        --activity-extension 0.2 \
+        --hard-timeout 0.2
+    [ "$status" -eq 0 ]
+    pid="$(json_query pid <<< "$output")"
+    remember_harness_pid "$pid"
+
+    run python3 "$script" wait --registry "$registry" --id codex-hard --until-seconds 1 --poll-seconds 0.02
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "timeout" ]
+    [ "$(json_query hard <<< "$output")" = "true" ]
+    wait_for_pid_exit "$pid"
+}
+
+@test "codex prototype harness: unavailable control and invalid identifiers are explicit" {
+    local script registry pid
+    script="$(prototype_harness_script)"
+    registry="$TEST_REPO/harness"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-unavailable \
+        --kind codex_agent \
+        --agent-id child-unavailable \
+        --command-json '["python3","-c","print(1)"]' \
+        --unavailable-control
+    [ "$status" -eq 0 ]
+    [ "$(json_query outcome <<< "$output")" = "unavailable-control" ]
+
+    run python3 "$script" status --registry "$registry" --id 'bad/id'
+    [ "$status" -eq 2 ]
+    [ "$(json_query outcome <<< "$output")" = "invalid-id" ]
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-agent \
+        --kind codex_agent \
+        --agent-id child-accepted \
+        --command-json '["python3","-c","import time; time.sleep(30)"]' \
+        --soft-timeout 1 \
+        --activity-extension 1 \
+        --hard-timeout 2
+    [ "$status" -eq 0 ]
+    [ "$(json_query agentId <<< "$output")" = "child-accepted" ]
+    pid="$(json_query pid <<< "$output")"
+    remember_harness_pid "$pid"
+    run python3 "$script" interrupt --registry "$registry" --id codex-agent
+    [ "$status" -eq 0 ]
+    wait_for_pid_exit "$pid"
+
+    run python3 "$script" launch \
+        --registry "$registry" \
+        --id codex-thread \
+        --kind codex_agent \
+        --agent-id child-present \
+        --thread-id task-thread \
+        --command-json '["python3","-c","print(1)"]'
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"unrecognized arguments: --thread-id task-thread"* ]]
 }
